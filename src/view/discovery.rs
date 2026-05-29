@@ -20,8 +20,12 @@ pub fn discover(root: &Path) -> Result<Vec<SessionEntry>> {
         if !dir.is_dir() { continue; }
         let meta_text = match std::fs::read_to_string(dir.join("meta.json")) { Ok(t) => t, Err(_) => continue };
         let meta: Meta = match serde_json::from_str(&meta_text) { Ok(m) => m, Err(_) => continue };
-        let status = std::fs::read_to_string(dir.join("status"))
+        let mut status = std::fs::read_to_string(dir.join("status"))
             .map(|s| s.trim().to_string()).unwrap_or_else(|_| "?".into());
+        if status == "live" && !pid_alive(meta.tracer_pid) {
+            let _ = std::fs::write(dir.join("status"), "crashed\n");
+            status = "crashed".into();
+        }
         let events_path = dir.join("events.jsonl");
         out.push(SessionEntry { dir, meta, status, events_path });
     }
@@ -31,4 +35,10 @@ pub fn discover(root: &Path) -> Result<Vec<SessionEntry>> {
         b.meta.started_at.cmp(&a.meta.started_at)
     });
     Ok(out)
+}
+
+fn pid_alive(pid: u32) -> bool {
+    use nix::sys::signal::kill;
+    use nix::unistd::Pid;
+    kill(Pid::from_raw(pid as i32), None).is_ok()
 }

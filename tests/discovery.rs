@@ -2,6 +2,9 @@ use peekaboo::view::discovery::{discover, SessionEntry};
 use tempfile::TempDir;
 
 fn touch_session(root: &std::path::Path, id: &str, status: &str, started: &str) {
+    // Use the current process PID as tracer_pid so that "live" sessions pass
+    // the pid_alive check (the test process is definitely alive).
+    let tracer_pid = std::process::id();
     let d = root.join("sessions").join(id);
     std::fs::create_dir_all(&d).unwrap();
     std::fs::write(d.join("status"), format!("{status}\n")).unwrap();
@@ -13,7 +16,7 @@ fn touch_session(root: &std::path::Path, id: &str, status: &str, started: &str) 
         "cwd": "/tmp/{id}",
         "argv": ["claude"],
         "claude_pid": 1,
-        "tracer_pid": 2,
+        "tracer_pid": {tracer_pid},
         "hostname": "h",
         "macos_version": "15.4",
         "peekaboo_version": "0.1.0"
@@ -73,4 +76,32 @@ fn app_ingests_events_into_panes() {
         flags: 0,
     });
     assert_eq!(app.recent_files.len(), 1);
+}
+
+#[test]
+fn discover_marks_stale_live_as_crashed() {
+    let root = TempDir::new().unwrap();
+    let id = "2026-05-28T09-00-00_stale_99999";
+    touch_session(root.path(), id, "live", "2026-05-28T09:00:00Z");
+    // Overwrite meta.json to set tracer_pid to a guaranteed-dead pid.
+    // We rewrite the entire file so we don't have to pattern-match the dynamic pid.
+    let meta_path = root.path().join("sessions").join(id).join("meta.json");
+    std::fs::write(&meta_path, format!(r#"{{
+        "session_id": "{id}",
+        "started_at": "2026-05-28T09:00:00Z",
+        "ended_at": null,
+        "cwd": "/tmp/{id}",
+        "argv": ["claude"],
+        "claude_pid": 1,
+        "tracer_pid": 4294967290,
+        "hostname": "h",
+        "macos_version": "15.4",
+        "peekaboo_version": "0.1.0"
+    }}"#)).unwrap();
+
+    let entries = peekaboo::view::discovery::discover(root.path()).unwrap();
+    let entry = entries.iter().find(|e| e.meta.session_id == id).unwrap();
+    assert_eq!(entry.status, "crashed");
+    let status = std::fs::read_to_string(root.path().join("sessions").join(id).join("status")).unwrap();
+    assert_eq!(status.trim(), "crashed");
 }
