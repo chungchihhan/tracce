@@ -35,9 +35,12 @@ fn main() -> std::process::ExitCode {
                 }
             }
         }
-        Cmd::FixPerms { .. } => {
-            eprintln!("peekaboo fix-perms: not implemented yet");
-            std::process::ExitCode::from(2)
+        Cmd::FixPerms { session } => {
+            let root = cli::root_dir();
+            match peekaboo::fix_perms::run(&root, session) {
+                Ok(()) => std::process::ExitCode::SUCCESS,
+                Err(e) => { eprintln!("peekaboo: {e:#}"); std::process::ExitCode::from(1) }
+            }
         }
     }
 }
