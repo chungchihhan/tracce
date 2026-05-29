@@ -7,6 +7,7 @@ use anyhow::{anyhow, Context, Result};
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -141,16 +142,32 @@ fn start_eslogger_thread(tx: SyncSender<Event>) -> Result<ThreadStop> {
         let mut child = match Command::new("/usr/bin/eslogger")
             .args(["exec", "fork", "exit", "open", "close", "create", "write"])
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .spawn()
         {
             Ok(c) => c,
-            Err(_) => return,
+            Err(e) => {
+                eprintln!("peekaboo · CRITICAL: eslogger failed to start: {e}");
+                return;
+            }
         };
+
+        // Drain eslogger's stderr in a background thread so it doesn't block.
+        if let Some(stderr) = child.stderr.take() {
+            thread::spawn(move || {
+                let reader = BufReader::new(stderr);
+                for line in reader.lines().flatten() {
+                    eprintln!("peekaboo · eslogger stderr: {line}");
+                }
+            });
+        }
+
         let stdout = child.stdout.take().unwrap();
         let reader = BufReader::new(stdout);
+        let event_count = AtomicUsize::new(0);
+        let parse_errors = AtomicUsize::new(0);
         for line in reader.lines() {
-            if stop.load(std::sync::atomic::Ordering::SeqCst) {
+            if stop.load(Ordering::SeqCst) {
                 break;
             }
             let line = match line {
@@ -159,13 +176,29 @@ fn start_eslogger_thread(tx: SyncSender<Event>) -> Result<ThreadStop> {
             };
             match eslogger::parse_line(&line) {
                 Ok(Some(ev)) => {
+                    event_count.fetch_add(1, Ordering::Relaxed);
                     if tx.send(ev).is_err() {
                         break;
                     }
                 }
-                _ => {}
+                Ok(None) => {}
+                Err(e) => {
+                    let n = parse_errors.fetch_add(1, Ordering::Relaxed) + 1;
+                    if n == 1 || n % 100 == 0 {
+                        eprintln!("peekaboo · eslogger parse error (#{n}): {e}");
+                    }
+                }
             }
         }
+
+        let total_events = event_count.load(Ordering::Relaxed);
+        if total_events == 0 {
+            eprintln!(
+                "peekaboo · WARNING: no eslogger events recorded; \
+                check Full Disk Access for your terminal app"
+            );
+        }
+
         let _ = child.kill();
         let _ = child.wait();
     });
