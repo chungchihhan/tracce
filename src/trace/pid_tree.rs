@@ -30,6 +30,10 @@ impl PidTree {
     /// Record exec — does not change membership but may be useful for argv updates elsewhere.
     pub fn on_exec(&mut self, _pid: u32) {}
 
+    pub fn pids(&self) -> Vec<u32> {
+        self.pids.iter().copied().collect()
+    }
+
     pub fn on_exit(&mut self, pid: u32) {
         if pid == self.root {
             // Root exits → conceptually the tree is dead, but keep set so late
