@@ -186,6 +186,7 @@ fn start_eslogger_thread(tx: SyncSender<Event>) -> Result<ThreadStop> {
         let reader = BufReader::new(stdout);
         let event_count = AtomicUsize::new(0);
         let parse_errors = AtomicUsize::new(0);
+        let unknown_count = AtomicUsize::new(0);
         for line in reader.lines() {
             if stop.load(Ordering::SeqCst) {
                 break;
@@ -201,7 +202,9 @@ fn start_eslogger_thread(tx: SyncSender<Event>) -> Result<ThreadStop> {
                         break;
                     }
                 }
-                Ok(None) => {}
+                Ok(None) => {
+                    unknown_count.fetch_add(1, Ordering::Relaxed);
+                }
                 Err(e) => {
                     let n = parse_errors.fetch_add(1, Ordering::Relaxed) + 1;
                     if n == 1 || n % 100 == 0 {
@@ -217,6 +220,11 @@ fn start_eslogger_thread(tx: SyncSender<Event>) -> Result<ThreadStop> {
                 "peekaboo · WARNING: no eslogger events recorded; \
                 check Full Disk Access for your terminal app"
             );
+        }
+
+        let unk = unknown_count.load(Ordering::Relaxed);
+        if unk > 0 {
+            eprintln!("peekaboo · note: {unk} eslogger lines had unrecognized event payload");
         }
 
         let _ = child.kill();
