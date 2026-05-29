@@ -80,6 +80,8 @@ impl Aggregator {
         vec![ev]
     }
 
+    pub fn pids(&self) -> Vec<u32> { self.tree.pids() }
+
     /// Flush any open bursts. Call when the trace is ending.
     pub fn flush(&mut self) -> Vec<Event> {
         let bursts = std::mem::take(&mut self.bursts);
