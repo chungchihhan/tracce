@@ -71,4 +71,15 @@ mod tests {
         let b = c.resolve(ip);
         assert_eq!(a, b);
     }
+
+    #[test]
+    #[ignore = "network-dependent"]
+    fn resolves_known_ip() {
+        let c = HostCache::new();
+        let ip: IpAddr = "1.1.1.1".parse().unwrap();
+        let resolved = c.resolve(ip);
+        // 1.1.1.1 should resolve to *something* (one.one.one.one usually)
+        eprintln!("resolved 1.1.1.1 -> {:?}", resolved);
+        // Don't hard-assert — different DNS servers return different names.
+    }
 }
