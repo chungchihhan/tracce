@@ -85,6 +85,7 @@ impl Aggregator {
     }
 
     pub fn pids(&self) -> Vec<u32> { self.tree.pids() }
+    pub fn tree_len(&self) -> usize { self.tree.len() }
 
     /// Flush any open bursts. Call when the trace is ending.
     pub fn flush(&mut self) -> Vec<Event> {

@@ -60,6 +60,15 @@ pub fn run(argv: Vec<String>, root: PathBuf) -> Result<i32> {
     // Give the child a tiny head start to spawn its descendants, then walk them.
     std::thread::sleep(std::time::Duration::from_millis(50));
     tree.seed_descendants();
+    {
+        let pids = tree.pids();
+        let pid_list: Vec<String> = pids.iter().map(|p| p.to_string()).collect();
+        eprintln!(
+            "peekaboo · debug: root pid {child_pid}, seeded tree has {} pids: [{}]",
+            pids.len(),
+            pid_list.join(", ")
+        );
+    }
     let agg = Arc::new(Mutex::new(Aggregator::new(tree)));
 
     // 3. Start eslogger reader thread.
@@ -75,17 +84,33 @@ pub fn run(argv: Vec<String>, root: PathBuf) -> Result<i32> {
     let (persist_tx, persist_rx) = mpsc::sync_channel::<Event>(PERSIST_CHAN_CAP);
     let agg_for_loop = agg.clone();
     let aggregator_handle = thread::spawn(move || {
+        let mut agg_raw_count: u64 = 0;
+        let mut agg_post_filter_count: u64 = 0;
         for raw in raw_rx {
+            agg_raw_count += 1;
+            // Sample the first 10 raw events before acquiring the lock.
+            if agg_raw_count <= 10 {
+                eprintln!(
+                    "peekaboo · debug: raw event #{}: kind={:?} pid={} ppid={}",
+                    agg_raw_count, raw.kind, raw.pid, raw.ppid
+                );
+            }
             let mut g = agg_for_loop.lock().unwrap();
             for ev in g.process(raw) {
+                agg_post_filter_count += 1;
                 let _ = persist_tx.send(ev);
             }
         }
         // Flush bursts on shutdown.
         let mut g = agg_for_loop.lock().unwrap();
         for ev in g.flush() {
+            agg_post_filter_count += 1;
             let _ = persist_tx.send(ev);
         }
+        let tree_size = g.tree_len();
+        eprintln!(
+            "peekaboo · debug: raw={agg_raw_count} post-filter={agg_post_filter_count} tree-final-size={tree_size}"
+        );
         drop(persist_tx);
     });
 
@@ -187,6 +212,7 @@ fn start_eslogger_thread(tx: SyncSender<Event>) -> Result<ThreadStop> {
 
         let stdout = child.stdout.take().unwrap();
         let reader = BufReader::new(stdout);
+        let raw_seen = AtomicUsize::new(0);
         let event_count = AtomicUsize::new(0);
         let parse_errors = AtomicUsize::new(0);
         let unknown_count = AtomicUsize::new(0);
@@ -198,6 +224,7 @@ fn start_eslogger_thread(tx: SyncSender<Event>) -> Result<ThreadStop> {
                 Ok(l) => l,
                 Err(_) => break,
             };
+            raw_seen.fetch_add(1, Ordering::Relaxed);
             match eslogger::parse_line(&line) {
                 Ok(Some(ev)) => {
                     event_count.fetch_add(1, Ordering::Relaxed);
@@ -217,7 +244,14 @@ fn start_eslogger_thread(tx: SyncSender<Event>) -> Result<ThreadStop> {
             }
         }
 
+        let total_raw = raw_seen.load(Ordering::Relaxed);
         let total_events = event_count.load(Ordering::Relaxed);
+        let total_unknown = unknown_count.load(Ordering::Relaxed);
+        let total_errors = parse_errors.load(Ordering::Relaxed);
+        eprintln!(
+            "peekaboo · debug: eslogger raw-lines={total_raw} parsed-ok={total_events} \
+             unrecognized={total_unknown} parse-errors={total_errors}"
+        );
         if total_events == 0 {
             eprintln!(
                 "peekaboo · WARNING: no eslogger events recorded; \
