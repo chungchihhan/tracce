@@ -22,7 +22,7 @@ impl SessionStatus {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Meta {
     pub session_id: String,
     pub started_at: DateTime<Utc>,
