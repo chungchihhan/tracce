@@ -41,3 +41,36 @@ fn discover_orders_live_first_then_recent() {
     assert!(entries[1].meta.session_id.contains("c_3"));
     assert!(entries[2].meta.session_id.contains("a_1"));
 }
+
+#[test]
+fn app_ingests_events_into_panes() {
+    use peekaboo::event::{Event, EventData, EventKind, FileOp, ProcessRef};
+    use peekaboo::view::discovery::SessionEntry;
+    use peekaboo::view::ui::app::App;
+    use peekaboo::trace::session::Meta;
+    use std::sync::Arc;
+
+    let session = SessionEntry {
+        dir: "/tmp".into(),
+        meta: Meta {
+            session_id: "s".into(),
+            started_at: chrono::Utc::now(),
+            ended_at: None,
+            cwd: "/tmp".into(),
+            argv: vec!["claude".into()],
+            claude_pid: 1, tracer_pid: 2,
+            hostname: "h".into(), macos_version: "15".into(), peekaboo_version: "0.1".into(),
+        },
+        status: "live".into(),
+        events_path: "/tmp/events.jsonl".into(),
+    };
+    let mut app = App::new(session);
+
+    app.ingest(Event {
+        ts_ns: 1, kind: EventKind::Open, pid: 4711, ppid: 1,
+        process: Arc::new(ProcessRef { pid: 4711, comm: "node".into(), image: "/usr/bin/node".into(), argv: vec![] }),
+        data: EventData::File { op: FileOp::Open, path: "/tmp/README.md".into(), size: None },
+        flags: 0,
+    });
+    assert_eq!(app.recent_files.len(), 1);
+}
