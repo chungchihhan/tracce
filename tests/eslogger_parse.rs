@@ -6,11 +6,11 @@ fn parses_exec_fixture() {
     let raw = include_str!("fixtures/eslogger_exec.json");
     let ev = parse_line(raw).unwrap().expect("exec should parse");
     assert_eq!(ev.kind, EventKind::Exec);
-    assert_eq!(ev.pid, 4710);
+    assert_eq!(ev.pid, 19468);
     match ev.data {
         EventData::Exec { argv, image } => {
-            assert_eq!(argv, vec!["claude", "--print", "hi"]);
-            assert_eq!(image.to_str().unwrap(), "/usr/local/bin/claude");
+            assert_eq!(argv, vec!["sh", "-c", "route -n get default |grep gateway |awk '{print $2}'"]);
+            assert_eq!(image.to_str().unwrap(), "/bin/bash");
         }
         _ => panic!("expected Exec"),
     }
@@ -32,7 +32,7 @@ fn parses_open_fixture() {
 
 #[test]
 fn unknown_event_returns_none() {
-    let raw = r#"{"event_type": 999999, "process": {"audit_token": {"pid": 1, "auid": 0, "euid": 0, "egid": 0, "ruid": 0, "rgid": 0, "asid": 0, "pidversion": 0}, "ppid": 0, "executable": {"path": "/x", "path_truncated": false}}, "time": {"tv_sec": 0, "tv_nsec": 0}}"#;
+    let raw = r#"{"event_type": 999999, "process": {"audit_token": {"pid": 1, "auid": 0, "euid": 0, "egid": 0, "ruid": 0, "rgid": 0, "asid": 0, "pidversion": 0}, "ppid": 0, "executable": {"path": "/x", "path_truncated": false}}, "time": "2026-05-29T07:28:26.228785687Z"}"#;
     let result = parse_line(raw).unwrap();
     assert!(result.is_none());
 }

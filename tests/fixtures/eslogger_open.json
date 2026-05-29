@@ -1,15 +1,1 @@
-{
-  "event_type": 14,
-  "process": {
-    "audit_token": { "pid": 4719, "auid": 501, "euid": 0, "egid": 0, "ruid": 0, "rgid": 0, "asid": 100002, "pidversion": 0 },
-    "ppid": 4711,
-    "executable": { "path": "/usr/local/bin/node", "path_truncated": false }
-  },
-  "event": {
-    "open": {
-      "file": { "path": "/Users/x/Developer/Personal/peekaboo/README.md", "path_truncated": false },
-      "fflag": 0
-    }
-  },
-  "time": { "tv_sec": 1716941071, "tv_nsec": 818000000 }
-}
+{"event_type":14,"process":{"audit_token":{"pid":4719,"auid":501,"euid":0,"egid":0,"ruid":0,"rgid":0,"asid":100002,"pidversion":0},"ppid":4711,"executable":{"path":"/usr/local/bin/node","path_truncated":false}},"event":{"open":{"file":{"path":"/Users/x/Developer/Personal/peekaboo/README.md","path_truncated":false},"fflag":0}},"time":"2026-05-29T07:27:10.000000000Z"}
