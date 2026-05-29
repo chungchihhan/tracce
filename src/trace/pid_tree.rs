@@ -42,11 +42,79 @@ impl PidTree {
         self.pids.remove(&pid);
         self.parents.remove(&pid);
     }
+
+    /// Seed the tree with all current descendants of `root` by walking the live process table.
+    /// Best-effort: silently no-op on sysctl failure.
+    pub fn seed_descendants(&mut self) {
+        use std::collections::HashMap;
+        let snapshot = match list_processes() {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        // Build pid -> ppid map.
+        let parent_of: HashMap<u32, u32> = snapshot.into_iter().collect();
+        // BFS from root.
+        let mut frontier: Vec<u32> = parent_of
+            .iter()
+            .filter_map(|(pid, ppid)| if *ppid == self.root { Some(*pid) } else { None })
+            .collect();
+        while let Some(p) = frontier.pop() {
+            if self.pids.insert(p) {
+                // Walk further down: any process whose parent is p.
+                for (child, &child_ppid) in parent_of.iter() {
+                    if child_ppid == p {
+                        frontier.push(*child);
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn list_processes() -> std::io::Result<Vec<(u32, u32)>> {
+    // Use /bin/ps -A -o pid=,ppid= which is available on all macOS systems.
+    // The trailing '=' suppresses the column header.
+    let out = std::process::Command::new("/bin/ps")
+        .args(["-A", "-o", "pid=,ppid="])
+        .output()?;
+    let mut v = Vec::new();
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        let mut it = line.split_whitespace();
+        if let (Some(p), Some(pp)) = (it.next(), it.next()) {
+            if let (Ok(p), Ok(pp)) = (p.parse::<u32>(), pp.parse::<u32>()) {
+                v.push((p, pp));
+            }
+        }
+    }
+    Ok(v)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn list_processes() -> std::io::Result<Vec<(u32, u32)>> {
+    Ok(Vec::new())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn seed_descendants_finds_live_children() {
+        // Spawn a child process, then call seed_descendants from the parent.
+        use std::process::Command;
+        let child = Command::new("sleep").arg("10").spawn().unwrap();
+        let our_pid = std::process::id();
+        let mut tree = PidTree::new(our_pid);
+        tree.seed_descendants();
+        assert!(tree.contains(child.id()),
+            "tree {tree:?} should contain spawned child {}", child.id());
+        // Clean up
+        let _ = nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(child.id() as i32),
+            nix::sys::signal::Signal::SIGKILL,
+        );
+    }
 
     #[test]
     fn root_is_in_tree() {

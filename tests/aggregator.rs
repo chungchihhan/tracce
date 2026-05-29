@@ -40,6 +40,17 @@ fn tags_sensitive_paths() {
 }
 
 #[test]
+fn ppid_in_tree_pulls_pid_into_tree() {
+    let tree = PidTree::new(100);
+    let mut agg = Aggregator::new(tree);
+    // Event from pid 200 whose ppid is 100 (root); pid 200 is not yet in tree.
+    let mut ev = file_event(1, 200, "/some/file");
+    ev.ppid = 100;
+    let out = agg.process(ev);
+    assert_eq!(out.len(), 1, "ppid-in-tree should pull pid 200 into the tree");
+}
+
+#[test]
 fn coalesces_burst_into_single_event() {
     let mut tree = PidTree::new(100);
     tree.on_fork(100, 200);

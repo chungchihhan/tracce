@@ -56,7 +56,10 @@ pub fn run(argv: Vec<String>, root: PathBuf) -> Result<i32> {
     eprintln!("peekaboo · recording to {}", session.dir().display());
 
     let persist = Arc::new(Persist::open(&session.events_path())?);
-    let tree = PidTree::new(child_pid);
+    let mut tree = PidTree::new(child_pid);
+    // Give the child a tiny head start to spawn its descendants, then walk them.
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    tree.seed_descendants();
     let agg = Arc::new(Mutex::new(Aggregator::new(tree)));
 
     // 3. Start eslogger reader thread.
