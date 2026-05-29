@@ -3,3 +3,4 @@ pub mod session;
 pub mod eslogger;
 pub mod network;
 pub mod persist;
+pub mod aggregator;
