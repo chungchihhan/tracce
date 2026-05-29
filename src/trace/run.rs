@@ -5,7 +5,6 @@ use crate::trace::{
 };
 use anyhow::{anyhow, Context, Result};
 use std::io::{BufRead, BufReader};
-use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -17,52 +16,58 @@ use std::time::Duration;
 const RAW_CHAN_CAP: usize = 4096;
 const PERSIST_CHAN_CAP: usize = 8192;
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
+const ESLOGGER_READY_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub fn run(argv: Vec<String>, root: PathBuf) -> Result<i32> {
     if argv.is_empty() {
         return Err(anyhow!("trace requires a command"));
     }
-    if !is_root() {
-        return Err(anyhow!(
-            "peekaboo trace must run as root; try: sudo peekaboo trace ..."
-        ));
-    }
 
     let cwd = std::env::current_dir()?;
     let tracer_pid = std::process::id();
 
-    // 1. Channels + warmup flag.
+    // Check whether sudo credentials are cached so we can warn the user early.
+    let sudo_cached = Command::new("sudo")
+        .args(["-n", "true"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !sudo_cached {
+        eprintln!("peekaboo · sudo will prompt for your password to run eslogger…");
+    }
+
+    // 1. Channels + ready signal.
     let (raw_tx, raw_rx) = mpsc::sync_channel::<Event>(RAW_CHAN_CAP);
-    let warmup = Arc::new(AtomicBool::new(true));
+    // ready_tx is sent to the eslogger thread; it fires once the first event arrives.
+    let (ready_tx, ready_rx) = mpsc::channel::<()>();
 
-    // 2. Start eslogger early so it has time to register its ES client.
-    let eslogger_handle = start_eslogger_thread(raw_tx.clone(), warmup.clone())?;
-    eprintln!("peekaboo · waiting for eslogger to subscribe...");
-    std::thread::sleep(Duration::from_millis(800));
+    // 2. Start eslogger early (via sudo) so it has time to register its ES client.
+    //    stdin is inherited so sudo can prompt for a password on the terminal.
+    let eslogger_handle = start_eslogger_thread(raw_tx.clone(), ready_tx)?;
 
-    // 3. Build Command (with uid/gid/HOME drop) but don't spawn yet.
+    // 3. Wait until eslogger is actually producing events (or timeout after 10 s).
+    eprintln!("peekaboo · waiting for eslogger to be ready (sudo may prompt)…");
+    let _ = ready_rx.recv_timeout(ESLOGGER_READY_TIMEOUT);
+
+    // 4. Build Command for the wrapped child (runs as the current user — no uid/gid drop needed).
     let mut cmd = Command::new(&argv[0]);
     cmd.args(&argv[1..])
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
-    if let (Ok(uid), Ok(gid)) = (sudo_uid(), sudo_gid()) {
-        cmd.uid(uid).gid(gid);
-        if let Some(home) = sudo_home(uid) {
-            cmd.env("HOME", home);
-        }
-    }
 
-    // 4. Flip warmup → live, THEN spawn so we don't miss the child's own fork+exec.
-    warmup.store(false, Ordering::SeqCst);
+    // 5. Spawn the child now that eslogger is subscribed.
     let mut child = cmd.spawn().with_context(|| format!("spawn {:?}", argv[0]))?;
     let child_pid = child.id();
 
-    // 5. Session dir.
+    // 6. Session dir.
     let session = Session::create(&root, child_pid, tracer_pid, &argv, &cwd)?;
     eprintln!("peekaboo · recording to {}", session.dir().display());
 
-    // 6. pid_tree (still seed descendants as a belt-and-suspenders measure).
+    // 7. pid_tree.
     let mut tree = PidTree::new(child_pid);
     tree.seed_descendants();
     eprintln!(
@@ -72,7 +77,7 @@ pub fn run(argv: Vec<String>, root: PathBuf) -> Result<i32> {
     );
     let agg = Arc::new(Mutex::new(Aggregator::new(tree)));
 
-    // 7. Persist + network + aggregator threads.
+    // 8. Persist + network + aggregator threads.
     let persist = Arc::new(Persist::open(&session.events_path())?);
     let agg_for_net = agg.clone();
     let net_raw_tx = raw_tx.clone();
@@ -120,7 +125,7 @@ pub fn run(argv: Vec<String>, root: PathBuf) -> Result<i32> {
         let _ = persist_for_writer.flush();
     });
 
-    // 8. Wait for child + shutdown as before.
+    // 9. Wait for child + shutdown.
     let status = child.wait()?;
     let exit_code = status.code().unwrap_or(-1);
 
@@ -131,32 +136,10 @@ pub fn run(argv: Vec<String>, root: PathBuf) -> Result<i32> {
     persist_handle.join().ok();
 
     session.mark_status(SessionStatus::Done)?;
-    if let (Ok(uid), Ok(gid)) = (sudo_uid(), sudo_gid()) {
-        let _ = session.chown_to(uid, gid);
-    }
+    // Session is owned by the user from the start — no chown needed.
     eprintln!("peekaboo · session ended · path: {}", session.dir().display());
 
     Ok(exit_code)
-}
-
-fn is_root() -> bool {
-    nix::unistd::Uid::effective().is_root()
-}
-
-fn sudo_uid() -> Result<u32> {
-    Ok(std::env::var("SUDO_UID")?.parse()?)
-}
-
-fn sudo_gid() -> Result<u32> {
-    Ok(std::env::var("SUDO_GID")?.parse()?)
-}
-
-fn sudo_home(uid: u32) -> Option<PathBuf> {
-    use nix::unistd::{Uid, User};
-    User::from_uid(Uid::from_raw(uid))
-        .ok()
-        .flatten()
-        .map(|u| u.dir)
 }
 
 pub struct ThreadStop {
@@ -173,19 +156,22 @@ impl ThreadStop {
     }
 }
 
-fn start_eslogger_thread(tx: SyncSender<Event>, warmup: Arc<AtomicBool>) -> Result<ThreadStop> {
+fn start_eslogger_thread(tx: SyncSender<Event>, ready_tx: mpsc::Sender<()>) -> Result<ThreadStop> {
     let flag = Arc::new(AtomicBool::new(false));
     let stop = flag.clone();
     let h = thread::spawn(move || {
-        let mut child = match Command::new("/usr/bin/eslogger")
-            .args(["exec", "fork", "exit", "open", "close", "create", "write"])
+        // Run eslogger via sudo so it lands in a different audit session from the
+        // wrapped child process.  stdin is inherited so sudo can prompt for a password.
+        let mut child = match Command::new("/usr/bin/sudo")
+            .args(["/usr/bin/eslogger", "exec", "fork", "exit", "open", "close", "create", "write"])
+            .stdin(Stdio::inherit())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
         {
             Ok(c) => c,
             Err(e) => {
-                eprintln!("peekaboo · CRITICAL: eslogger failed to start: {e}");
+                eprintln!("peekaboo · CRITICAL: failed to spawn sudo eslogger: {e}");
                 return;
             }
         };
@@ -206,6 +192,8 @@ fn start_eslogger_thread(tx: SyncSender<Event>, warmup: Arc<AtomicBool>) -> Resu
         let event_count = AtomicUsize::new(0);
         let parse_errors = AtomicUsize::new(0);
         let unknown_count = AtomicUsize::new(0);
+        // Use Option so we can take() it after the first send (avoids clone).
+        let mut ready_tx = Some(ready_tx);
         for line in reader.lines() {
             if stop.load(Ordering::SeqCst) {
                 break;
@@ -217,13 +205,13 @@ fn start_eslogger_thread(tx: SyncSender<Event>, warmup: Arc<AtomicBool>) -> Resu
             raw_seen.fetch_add(1, Ordering::Relaxed);
             match eslogger::parse_line(&line) {
                 Ok(Some(ev)) => {
-                    if warmup.load(Ordering::SeqCst) {
-                        // discard during warmup
-                    } else {
-                        event_count.fetch_add(1, Ordering::Relaxed);
-                        if tx.send(ev).is_err() {
-                            break;
-                        }
+                    // Signal ready on the very first successfully parsed event.
+                    if let Some(tx) = ready_tx.take() {
+                        let _ = tx.send(());
+                    }
+                    event_count.fetch_add(1, Ordering::Relaxed);
+                    if tx.send(ev).is_err() {
+                        break;
                     }
                 }
                 Ok(None) => {

@@ -1,10 +1,11 @@
 # peekaboo
 
 macOS-only kernel-event tracer for Claude Code sessions. Wrap `claude` with
-`sudo peekaboo trace claude ...`, then watch what it's doing in a second
+`peekaboo trace claude ...`, then watch what it's doing in a second
 terminal with `peekaboo view`.
 
-> Personal/audit tool — requires sudo and Full Disk Access for your terminal app.
+> Personal/audit tool — requires Full Disk Access for your terminal app.
+> peekaboo itself runs as you; it uses `sudo` only to launch `eslogger`.
 
 ## Install
 
@@ -18,8 +19,8 @@ sudo cp target/release/peekaboo /usr/local/bin/
 ## Usage
 
 ```
-# Terminal A
-sudo peekaboo trace claude --print "explain this repo"
+# Terminal A — peekaboo runs as you; sudo will prompt for password to start eslogger.
+peekaboo trace claude --print "explain this repo"
 
 # Terminal B
 peekaboo view
@@ -28,10 +29,10 @@ peekaboo view <session-id-prefix>
 peekaboo list
 ```
 
-If a `trace` crashes and leaves files owned by root, run:
+If a `trace` crashes and leaves files in an odd state, run:
 
 ```
-sudo peekaboo fix-perms
+peekaboo fix-perms
 ```
 
 ## How it works
