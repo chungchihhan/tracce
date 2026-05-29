@@ -5,6 +5,7 @@ use crate::trace::{
 };
 use anyhow::{anyhow, Context, Result};
 use std::io::{BufRead, BufReader};
+use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -29,11 +30,22 @@ pub fn run(argv: Vec<String>, root: PathBuf) -> Result<i32> {
 
     // 1. Spawn the wrapped child.
     let cwd = std::env::current_dir()?;
-    let mut child = Command::new(&argv[0])
-        .args(&argv[1..])
+    let mut cmd = Command::new(&argv[0]);
+    cmd.args(&argv[1..])
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
+        .stderr(Stdio::inherit());
+
+    // Drop privileges back to the invoking user so the child sees its own
+    // ~/.config/claude, credentials, etc.
+    if let (Ok(uid), Ok(gid)) = (sudo_uid(), sudo_gid()) {
+        cmd.uid(uid).gid(gid);
+        if let Some(home) = sudo_home(uid) {
+            cmd.env("HOME", home);
+        }
+    }
+
+    let mut child = cmd
         .spawn()
         .with_context(|| format!("spawn {:?}", argv[0]))?;
     let child_pid = child.id();
@@ -118,6 +130,14 @@ fn sudo_uid() -> Result<u32> {
 
 fn sudo_gid() -> Result<u32> {
     Ok(std::env::var("SUDO_GID")?.parse()?)
+}
+
+fn sudo_home(uid: u32) -> Option<PathBuf> {
+    use nix::unistd::{Uid, User};
+    User::from_uid(Uid::from_raw(uid))
+        .ok()
+        .flatten()
+        .map(|u| u.dir)
 }
 
 pub struct ThreadStop {
