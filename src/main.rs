@@ -20,9 +20,14 @@ fn main() -> std::process::ExitCode {
             std::process::ExitCode::from(2)
         }
         Cmd::List => {
-            // empty table is success
-            println!("STATUS\tSTARTED\tCWD\tCLAUDE_PID\tEVENTS\tSESSION_ID");
-            std::process::ExitCode::SUCCESS
+            let root = cli::root_dir();
+            match peekaboo::list::run(&root) {
+                Ok(()) => std::process::ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("peekaboo: {e:#}");
+                    std::process::ExitCode::from(1)
+                }
+            }
         }
         Cmd::FixPerms { .. } => {
             eprintln!("peekaboo fix-perms: not implemented yet");
