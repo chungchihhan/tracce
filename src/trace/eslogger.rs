@@ -1,5 +1,6 @@
 use crate::event::{Event, EventData, EventKind, FileOp, ProcessRef};
 use anyhow::{Context, Result};
+use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -20,7 +21,8 @@ struct RawEnvelope {
     process: RawProc,
     #[serde(default)]
     event: serde_json::Value,
-    time: RawTime,
+    #[serde(default)]
+    time: Option<DateTime<Utc>>,
 }
 
 #[derive(Deserialize)]
@@ -36,16 +38,16 @@ struct AuditToken { pid: u32 }
 #[derive(Deserialize)]
 struct RawExe { path: String }
 
-#[derive(Deserialize)]
-struct RawTime { tv_sec: i64, tv_nsec: i64 }
-
 /// Parse a single eslogger JSON line into an `Event`.
 /// Returns `Ok(None)` for events we don't track (unknown event_type).
 pub fn parse_line(line: &str) -> Result<Option<Event>> {
     let env: RawEnvelope = serde_json::from_str(line)
         .with_context(|| format!("eslogger line: {}", &line[..line.len().min(120)]))?;
 
-    let ts_ns = (env.time.tv_sec as u64) * 1_000_000_000 + env.time.tv_nsec as u64;
+    let ts_ns: u64 = env.time
+        .and_then(|dt| dt.timestamp_nanos_opt())
+        .and_then(|n| u64::try_from(n).ok())
+        .unwrap_or(0);
     let pid = env.process.audit_token.pid;
     let ppid = env.process.ppid;
     let image = PathBuf::from(&env.process.executable.path);
