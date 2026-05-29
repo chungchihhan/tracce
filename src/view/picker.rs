@@ -1,8 +1,6 @@
 use crate::view::discovery::SessionEntry;
 use anyhow::Result;
 use crossterm::event::{self, Event as CtEvent, KeyCode};
-use crossterm::execute;
-use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
@@ -13,10 +11,8 @@ use std::io::stdout;
 
 pub fn pick(entries: Vec<SessionEntry>) -> Result<Option<SessionEntry>> {
     if entries.is_empty() { return Ok(None); }
-    enable_raw_mode()?;
-    let mut out = stdout();
-    execute!(out, EnterAlternateScreen)?;
-    let backend = CrosstermBackend::new(out);
+    let _guard = crate::view::TerminalGuard::enter()?;
+    let backend = CrosstermBackend::new(stdout());
     let mut term = Terminal::new(backend)?;
 
     let mut state = ListState::default();
@@ -59,7 +55,5 @@ pub fn pick(entries: Vec<SessionEntry>) -> Result<Option<SessionEntry>> {
         }
     }
 
-    execute!(term.backend_mut(), LeaveAlternateScreen)?;
-    disable_raw_mode()?;
     Ok(picked.map(|i| entries[i].clone()))
 }
