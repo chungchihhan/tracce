@@ -1,0 +1,19 @@
+{
+  "event_type": 9,
+  "process": {
+    "audit_token": { "pid": 4710, "auid": 501, "euid": 0, "egid": 0, "ruid": 0, "rgid": 0, "asid": 100002, "pidversion": 0 },
+    "ppid": 4700,
+    "executable": { "path": "/bin/bash", "path_truncated": false }
+  },
+  "event": {
+    "exec": {
+      "target": {
+        "audit_token": { "pid": 4710, "auid": 501, "euid": 0, "egid": 0, "ruid": 0, "rgid": 0, "asid": 100002, "pidversion": 0 },
+        "ppid": 4700,
+        "executable": { "path": "/usr/local/bin/claude", "path_truncated": false },
+        "args": ["claude", "--print", "hi"]
+      }
+    }
+  },
+  "time": { "tv_sec": 1716941071, "tv_nsec": 412000000 }
+}
