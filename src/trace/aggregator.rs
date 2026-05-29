@@ -36,6 +36,10 @@ impl Aggregator {
             EventData::Exec { .. }        => self.tree.on_exec(ev.pid),
             _ => {}
         }
+        // Add to tree opportunistically: if our parent is tracked, we are too.
+        if !self.tree.contains(ev.pid) && ev.ppid != 0 && self.tree.contains(ev.ppid) {
+            self.tree.on_fork(ev.ppid, ev.pid);
+        }
         if !self.tree.contains(ev.pid) {
             return Vec::new();
         }
