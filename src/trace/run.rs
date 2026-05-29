@@ -8,7 +8,7 @@ use std::io::{BufRead, BufReader};
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -28,16 +28,24 @@ pub fn run(argv: Vec<String>, root: PathBuf) -> Result<i32> {
         ));
     }
 
-    // 1. Spawn the wrapped child.
     let cwd = std::env::current_dir()?;
+    let tracer_pid = std::process::id();
+
+    // 1. Channels + warmup flag.
+    let (raw_tx, raw_rx) = mpsc::sync_channel::<Event>(RAW_CHAN_CAP);
+    let warmup = Arc::new(AtomicBool::new(true));
+
+    // 2. Start eslogger early so it has time to register its ES client.
+    let eslogger_handle = start_eslogger_thread(raw_tx.clone(), warmup.clone())?;
+    eprintln!("peekaboo · waiting for eslogger to subscribe...");
+    std::thread::sleep(Duration::from_millis(800));
+
+    // 3. Build Command (with uid/gid/HOME drop) but don't spawn yet.
     let mut cmd = Command::new(&argv[0]);
     cmd.args(&argv[1..])
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
-
-    // Drop privileges back to the invoking user so the child sees its own
-    // ~/.config/claude, credentials, etc.
     if let (Ok(uid), Ok(gid)) = (sudo_uid(), sudo_gid()) {
         cmd.uid(uid).gid(gid);
         if let Some(home) = sudo_home(uid) {
@@ -45,76 +53,65 @@ pub fn run(argv: Vec<String>, root: PathBuf) -> Result<i32> {
         }
     }
 
-    let mut child = cmd
-        .spawn()
-        .with_context(|| format!("spawn {:?}", argv[0]))?;
+    // 4. Flip warmup → live, THEN spawn so we don't miss the child's own fork+exec.
+    warmup.store(false, Ordering::SeqCst);
+    let mut child = cmd.spawn().with_context(|| format!("spawn {:?}", argv[0]))?;
     let child_pid = child.id();
-    let tracer_pid = std::process::id();
 
-    // 2. Session dir.
+    // 5. Session dir.
     let session = Session::create(&root, child_pid, tracer_pid, &argv, &cwd)?;
     eprintln!("peekaboo · recording to {}", session.dir().display());
 
-    let persist = Arc::new(Persist::open(&session.events_path())?);
+    // 6. pid_tree (still seed descendants as a belt-and-suspenders measure).
     let mut tree = PidTree::new(child_pid);
-    // Give the child a tiny head start to spawn its descendants, then walk them.
-    std::thread::sleep(std::time::Duration::from_millis(50));
     tree.seed_descendants();
-    {
-        let pids = tree.pids();
-        let pid_list: Vec<String> = pids.iter().map(|p| p.to_string()).collect();
-        eprintln!(
-            "peekaboo · debug: root pid {child_pid}, seeded tree has {} pids: [{}]",
-            pids.len(),
-            pid_list.join(", ")
-        );
-    }
+    eprintln!(
+        "peekaboo · debug: root pid {child_pid}, seeded tree has {} pids: {:?}",
+        tree.len(),
+        tree.pids()
+    );
     let agg = Arc::new(Mutex::new(Aggregator::new(tree)));
 
-    // 3. Start eslogger reader thread.
-    let (raw_tx, raw_rx) = mpsc::sync_channel::<Event>(RAW_CHAN_CAP);
-    let eslogger_handle = start_eslogger_thread(raw_tx.clone())?;
-
-    // 4. Start network poller thread.
+    // 7. Persist + network + aggregator threads.
+    let persist = Arc::new(Persist::open(&session.events_path())?);
     let agg_for_net = agg.clone();
     let net_raw_tx = raw_tx.clone();
     let net_handle = start_network_thread(child_pid, agg_for_net, net_raw_tx)?;
-
-    // 5. Aggregator thread: drain raw_rx, write to persist.
     let (persist_tx, persist_rx) = mpsc::sync_channel::<Event>(PERSIST_CHAN_CAP);
     let agg_for_loop = agg.clone();
     let aggregator_handle = thread::spawn(move || {
-        let mut agg_raw_count: u64 = 0;
-        let mut agg_post_filter_count: u64 = 0;
+        let mut raw_count = 0usize;
+        let mut post_filter_count = 0usize;
+        let mut samples_printed = 0usize;
         for raw in raw_rx {
-            agg_raw_count += 1;
-            // Sample the first 10 raw events before acquiring the lock.
-            if agg_raw_count <= 10 {
+            raw_count += 1;
+            if samples_printed < 10 {
                 eprintln!(
                     "peekaboo · debug: raw event #{}: kind={:?} pid={} ppid={}",
-                    agg_raw_count, raw.kind, raw.pid, raw.ppid
+                    samples_printed + 1,
+                    raw.kind,
+                    raw.pid,
+                    raw.ppid,
                 );
+                samples_printed += 1;
             }
             let mut g = agg_for_loop.lock().unwrap();
             for ev in g.process(raw) {
-                agg_post_filter_count += 1;
+                post_filter_count += 1;
                 let _ = persist_tx.send(ev);
             }
         }
-        // Flush bursts on shutdown.
         let mut g = agg_for_loop.lock().unwrap();
         for ev in g.flush() {
-            agg_post_filter_count += 1;
+            post_filter_count += 1;
             let _ = persist_tx.send(ev);
         }
-        let tree_size = g.tree_len();
         eprintln!(
-            "peekaboo · debug: raw={agg_raw_count} post-filter={agg_post_filter_count} tree-final-size={tree_size}"
+            "peekaboo · debug: raw={raw_count} post-filter={post_filter_count} tree-final-size={}",
+            g.tree_len()
         );
         drop(persist_tx);
     });
-
-    // 6. Persist thread.
     let persist_for_writer = persist.clone();
     let persist_handle = thread::spawn(move || {
         for ev in persist_rx {
@@ -123,27 +120,21 @@ pub fn run(argv: Vec<String>, root: PathBuf) -> Result<i32> {
         let _ = persist_for_writer.flush();
     });
 
-    // 7. Wait for child.
+    // 8. Wait for child + shutdown as before.
     let status = child.wait()?;
     let exit_code = status.code().unwrap_or(-1);
 
-    // 8. Shut down ordered: signal eslogger + net to stop, then drain.
     eslogger_handle.shutdown();
     net_handle.shutdown();
-    drop(raw_tx); // close the channel so aggregator thread exits
-
+    drop(raw_tx);
     aggregator_handle.join().ok();
     persist_handle.join().ok();
 
-    // 9. Finalize session.
     session.mark_status(SessionStatus::Done)?;
     if let (Ok(uid), Ok(gid)) = (sudo_uid(), sudo_gid()) {
         let _ = session.chown_to(uid, gid);
     }
-    eprintln!(
-        "peekaboo · session ended · path: {}",
-        session.dir().display()
-    );
+    eprintln!("peekaboo · session ended · path: {}", session.dir().display());
 
     Ok(exit_code)
 }
@@ -169,22 +160,21 @@ fn sudo_home(uid: u32) -> Option<PathBuf> {
 }
 
 pub struct ThreadStop {
-    flag: Arc<std::sync::atomic::AtomicBool>,
+    flag: Arc<AtomicBool>,
     join: Option<thread::JoinHandle<()>>,
 }
 
 impl ThreadStop {
     fn shutdown(mut self) {
-        self.flag
-            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.flag.store(true, Ordering::SeqCst);
         if let Some(h) = self.join.take() {
             let _ = h.join();
         }
     }
 }
 
-fn start_eslogger_thread(tx: SyncSender<Event>) -> Result<ThreadStop> {
-    let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+fn start_eslogger_thread(tx: SyncSender<Event>, warmup: Arc<AtomicBool>) -> Result<ThreadStop> {
+    let flag = Arc::new(AtomicBool::new(false));
     let stop = flag.clone();
     let h = thread::spawn(move || {
         let mut child = match Command::new("/usr/bin/eslogger")
@@ -227,9 +217,13 @@ fn start_eslogger_thread(tx: SyncSender<Event>) -> Result<ThreadStop> {
             raw_seen.fetch_add(1, Ordering::Relaxed);
             match eslogger::parse_line(&line) {
                 Ok(Some(ev)) => {
-                    event_count.fetch_add(1, Ordering::Relaxed);
-                    if tx.send(ev).is_err() {
-                        break;
+                    if warmup.load(Ordering::SeqCst) {
+                        // discard during warmup
+                    } else {
+                        event_count.fetch_add(1, Ordering::Relaxed);
+                        if tx.send(ev).is_err() {
+                            break;
+                        }
                     }
                 }
                 Ok(None) => {
@@ -279,7 +273,7 @@ fn start_network_thread(
     tx: SyncSender<Event>,
 ) -> Result<ThreadStop> {
     use crate::event::{EventData, EventKind, NetProto, ProcessRef};
-    let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = Arc::new(AtomicBool::new(false));
     let stop = flag.clone();
     let h = thread::spawn(move || {
         let host_cache = crate::hosts::HostCache::new();
@@ -290,7 +284,7 @@ fn start_network_thread(
             image: PathBuf::new(),
             argv: vec![],
         });
-        while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+        while !stop.load(Ordering::SeqCst) {
             let pids = collect_pids(&agg);
 
             let raw = match network::run_lsof(&pids) {
