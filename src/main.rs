@@ -15,9 +15,15 @@ fn main() -> std::process::ExitCode {
                 }
             }
         }
-        Cmd::View { .. } => {
-            eprintln!("peekaboo view: not implemented yet");
-            std::process::ExitCode::from(2)
+        Cmd::View { target, latest, no_follow } => {
+            let root = cli::root_dir();
+            match peekaboo::view::run::run(target, latest, no_follow, &root) {
+                Ok(()) => std::process::ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("peekaboo: {e:#}");
+                    std::process::ExitCode::from(1)
+                }
+            }
         }
         Cmd::List => {
             let root = cli::root_dir();
