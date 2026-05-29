@@ -1,0 +1,34 @@
+[package]
+name = "peekaboo"
+version = "0.1.0"
+edition = "2021"
+description = "macOS kernel-event tracer for Claude Code sessions"
+license = "MIT"
+rust-version = "1.75"
+
+[[bin]]
+name = "peekaboo"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4.5", features = ["derive"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+ratatui = "0.29"
+crossterm = "0.28"
+chrono = { version = "0.4", features = ["serde"] }
+nix = { version = "0.29", features = ["signal", "process"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1.0"
+thiserror = "1.0"
+
+[dev-dependencies]
+pretty_assertions = "1.4"
+tempfile = "3.10"
+insta = { version = "1.40", features = ["yaml"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
