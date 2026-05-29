@@ -1,7 +1,5 @@
 use crate::view::{discovery, picker, tail::Tail, ui::app::App};
 use anyhow::{anyhow, Result};
-use crossterm::execute;
-use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use std::io::stdout;
@@ -14,10 +12,8 @@ pub fn run(target: Option<String>, latest: bool, no_follow: bool, root: &Path) -
     let mut tail = Tail::open(&entry.events_path, follow)?;
     let mut app = App::new(entry);
 
-    enable_raw_mode()?;
-    let mut out = stdout();
-    execute!(out, EnterAlternateScreen)?;
-    let backend = CrosstermBackend::new(out);
+    let _guard = crate::view::TerminalGuard::enter()?;
+    let backend = CrosstermBackend::new(stdout());
     let mut term = Terminal::new(backend)?;
 
     while !app.quit {
@@ -29,8 +25,6 @@ pub fn run(target: Option<String>, latest: bool, no_follow: bool, root: &Path) -
         app.poll_input(Duration::from_millis(50))?;
     }
 
-    execute!(term.backend_mut(), LeaveAlternateScreen)?;
-    disable_raw_mode()?;
     Ok(())
 }
 
@@ -57,9 +51,13 @@ fn select_entry(target: Option<String>, latest: bool, root: &Path) -> Result<cra
         if let Some(e) = live.first() { return Ok((*e).clone()); }
         return Err(anyhow!("no live session to open with --latest"));
     }
-    // Auto-pick rule from spec: 1 live, no others -> open it; else picker.
+    // Auto-pick rule from spec: 1 live -> open it; 1 total -> open it; else picker.
     let live: Vec<_> = entries.iter().filter(|e| e.status == "live").collect();
-    if entries.len() == 1 || (live.len() == 1 && entries.len() == 1) {
+    if live.len() == 1 {
+        let only_live = live[0].clone();
+        return Ok(only_live);
+    }
+    if entries.len() == 1 {
         return Ok(entries[0].clone());
     }
     match picker::pick(entries)? {
