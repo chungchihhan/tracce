@@ -1,0 +1,24 @@
+# Personal / working artifacts not for public history
+docs/
+CLAUDE.md
+
+# Rust
+/target
+**/*.rs.bk
+Cargo.lock.bak
+
+# macOS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# Editor swap/backups
+*.swp
+*.swo
+*~
+
+# Local peekaboo session output (only relevant if someone runs the tool from inside the repo)
+.peekaboo/
