@@ -1,5 +1,5 @@
 [package]
-name = "peekaboo"
+name = "ctrace"
 version = "0.1.0"
 edition = "2021"
 description = "macOS kernel-event tracer for Claude Code sessions"
@@ -7,11 +7,11 @@ license = "MIT"
 rust-version = "1.75"
 
 [[bin]]
-name = "peekaboo"
+name = "ctrace"
 path = "src/main.rs"
 
 [lib]
-name = "peekaboo"
+name = "ctrace"
 path = "src/lib.rs"
 
 [dependencies]
@@ -26,6 +26,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1.0"
 thiserror = "1.0"
+dirs = "5.0"
 
 [dev-dependencies]
 pretty_assertions = "1.4"

@@ -20,5 +20,5 @@ Cargo.lock.bak
 *.swo
 *~
 
-# Local peekaboo session output (only relevant if someone runs the tool from inside the repo)
-.peekaboo/
+# Local ctrace session output (only relevant if someone runs the tool from inside the repo)
+.ctrace/

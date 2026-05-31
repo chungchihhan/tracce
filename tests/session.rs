@@ -1,4 +1,4 @@
-use peekaboo::trace::session::{Session, SessionStatus};
+use ctrace::trace::session::{Session, SessionStatus};
 use tempfile::TempDir;
 
 #[test]
@@ -9,7 +9,7 @@ fn session_creates_dir_with_expected_files() {
         4711,
         std::process::id(),
         &["claude".into(), "--print".into(), "hi".into()],
-        std::path::Path::new("/Users/x/Developer/Personal/peekaboo"),
+        std::path::Path::new("/Users/x/Developer/Personal/ctrace"),
     ).unwrap();
 
     assert!(s.dir().exists());
@@ -28,11 +28,11 @@ fn session_id_contains_cwd_basename_and_pid() {
         4711,
         std::process::id(),
         &["claude".into()],
-        std::path::Path::new("/Users/x/Developer/Personal/peekaboo"),
+        std::path::Path::new("/Users/x/Developer/Personal/ctrace"),
     ).unwrap();
 
     let id = s.id();
-    assert!(id.contains("peekaboo"));
+    assert!(id.contains("ctrace"));
     assert!(id.contains("4711"));
 }
 

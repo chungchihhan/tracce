@@ -98,6 +98,34 @@ pub fn parse_line(line: &str) -> Result<Option<Event>> {
             .map(PathBuf::from)
             .unwrap_or_default();
         (EventKind::Write, EventData::File { op: FileOp::Write, path, size: None })
+    } else if let Some(unlink) = evt.get("unlink") {
+        let path = unlink.get("target")
+            .and_then(|t| t.get("path"))
+            .and_then(|p| p.as_str())
+            .map(PathBuf::from)
+            .unwrap_or_default();
+        (EventKind::Unlink, EventData::File { op: FileOp::Delete, path, size: None })
+    } else if let Some(rename) = evt.get("rename") {
+        // We surface the destination path — that's the file's final identity
+        // and the one a sensitive-path matcher should evaluate. The ES schema
+        // either reports an existing-file destination or a (dir + filename) pair.
+        let dest = rename.get("destination").and_then(|d| {
+            d.get("existing_file")
+                .and_then(|e| e.get("path"))
+                .and_then(|p| p.as_str())
+                .map(PathBuf::from)
+                .or_else(|| {
+                    let dir = d.get("new_path")
+                        .and_then(|n| n.get("dir"))
+                        .and_then(|d| d.get("path"))
+                        .and_then(|p| p.as_str())?;
+                    let name = d.get("new_path")
+                        .and_then(|n| n.get("filename"))
+                        .and_then(|p| p.as_str())?;
+                    Some(PathBuf::from(dir).join(name))
+                })
+        }).unwrap_or_default();
+        (EventKind::Rename, EventData::File { op: FileOp::Rename, path: dest, size: None })
     } else {
         return Ok(None);
     };

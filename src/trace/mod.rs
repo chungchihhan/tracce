@@ -1,7 +1,9 @@
 pub mod pid_tree;
 pub mod session;
 pub mod eslogger;
+pub mod claude_transcript;
 pub mod network;
 pub mod persist;
 pub mod aggregator;
 pub mod run;
+pub mod attach;

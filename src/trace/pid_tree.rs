@@ -95,6 +95,60 @@ fn list_processes() -> std::io::Result<Vec<(u32, u32)>> {
     Ok(Vec::new())
 }
 
+/// Snapshot all current descendants of `root`, returning `(pid, ppid, comm)`
+/// in BFS order from the root. Used by the poll-only trace mode to synthesize
+/// Exec events for processes we'd otherwise learn about via eslogger.
+///
+/// BFS ordering matters: the aggregator only adds a pid to its tree if the
+/// pid's parent is already in the tree, so parents must be emitted first.
+#[cfg(target_os = "macos")]
+pub fn list_descendants_with_comm(root: u32) -> std::io::Result<Vec<(u32, u32, String)>> {
+    use std::collections::VecDeque;
+    let out = std::process::Command::new("/bin/ps")
+        .args(["-A", "-o", "pid=,ppid=,command="])
+        .output()?;
+    // pid -> (ppid, full command). `command=` gives executable + argv, which
+    // is what we want for display — `comm=` only shows the binary name and
+    // wraps mismatched names in parens like "(git)".
+    let mut all: HashMap<u32, (u32, String)> = HashMap::new();
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        // split_whitespace handles ps's right-aligned numeric columns (which
+        // emit leading spaces for short pids) and collapses interior runs.
+        let mut parts = line.split_whitespace();
+        if let (Some(p), Some(pp), Some(first)) = (parts.next(), parts.next(), parts.next()) {
+            if let (Ok(p), Ok(pp)) = (p.parse::<u32>(), pp.parse::<u32>()) {
+                // Strip the path from argv[0] so "git status" fits the column
+                // instead of "/usr/bin/git status". Note: macOS ps wraps
+                // zombie processes' comms as "(name)" — we keep the parens
+                // as a visual signal that the process has exited.
+                let bn = std::path::Path::new(first).file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or(first);
+                let rest: Vec<&str> = parts.collect();
+                let cmd = if rest.is_empty() { bn.to_string() } else { format!("{bn} {}", rest.join(" ")) };
+                all.insert(p, (pp, cmd));
+            }
+        }
+    }
+    let mut visited: HashSet<u32> = HashSet::from([root]);
+    let mut queue: VecDeque<u32> = VecDeque::from([root]);
+    let mut ordered: Vec<(u32, u32, String)> = Vec::new();
+    while let Some(p) = queue.pop_front() {
+        for (&child, (pp, comm)) in &all {
+            if *pp == p && visited.insert(child) {
+                ordered.push((child, *pp, comm.clone()));
+                queue.push_back(child);
+            }
+        }
+    }
+    Ok(ordered)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn list_descendants_with_comm(_root: u32) -> std::io::Result<Vec<(u32, u32, String)>> {
+    Ok(Vec::new())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

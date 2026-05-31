@@ -24,7 +24,11 @@ pub fn pick(entries: Vec<SessionEntry>) -> Result<Option<SessionEntry>> {
             let area = f.area();
             let inner = Rect { x: area.x+1, y: area.y+1, width: area.width-2, height: area.height-2 };
             let items: Vec<ListItem> = entries.iter().map(|e| {
-                let glyph = if e.status == "live" { "● LIVE" } else { "○ done" };
+                let glyph = match e.status.as_str() {
+                    "live" => "● live",
+                    "crashed" => "✗ crash",
+                    _ => "○ done",
+                };
                 ListItem::new(Line::from(vec![
                     Span::raw(format!("{glyph}  ")),
                     Span::raw(format!("{}  ", e.meta.started_at.format("%Y-%m-%d %H:%M"))),
@@ -33,7 +37,7 @@ pub fn pick(entries: Vec<SessionEntry>) -> Result<Option<SessionEntry>> {
                     Span::styled(format!("  {}", e.meta.session_id), Style::default().add_modifier(Modifier::DIM)),
                 ]))
             }).collect();
-            let block = Block::default().borders(Borders::ALL).title(" peekaboo · select a session ");
+            let block = Block::default().borders(Borders::ALL).title(" ctrace · select a session ");
             let list = List::new(items).block(block).highlight_style(
                 Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD));
             f.render_stateful_widget(list, inner, &mut state);

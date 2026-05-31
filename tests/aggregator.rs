@@ -1,6 +1,6 @@
-use peekaboo::event::{Event, EventData, EventKind, FileOp, ProcessRef, FLAG_SENSITIVE, FLAG_COALESCED};
-use peekaboo::trace::aggregator::Aggregator;
-use peekaboo::trace::pid_tree::PidTree;
+use ctrace::event::{Event, EventData, EventKind, FileOp, ProcessRef, FLAG_SENSITIVE, FLAG_COALESCED};
+use ctrace::trace::aggregator::Aggregator;
+use ctrace::trace::pid_tree::PidTree;
 use std::sync::Arc;
 
 fn file_event(ts: u64, pid: u32, path: &str) -> Event {
