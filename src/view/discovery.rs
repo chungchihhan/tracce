@@ -10,6 +10,21 @@ pub struct SessionEntry {
     pub events_path: PathBuf,
 }
 
+/// Build a `SessionEntry` for a single session directory by reading its
+/// `meta.json` and `status`. Used by attach to construct an entry for the live
+/// session it just created, without re-scanning the whole sessions root.
+pub fn entry_for_dir(dir: &Path) -> Result<SessionEntry> {
+    use anyhow::Context;
+    let meta_text = std::fs::read_to_string(dir.join("meta.json"))
+        .with_context(|| format!("read meta.json in {}", dir.display()))?;
+    let meta: Meta = serde_json::from_str(&meta_text).context("parse meta.json")?;
+    let status = std::fs::read_to_string(dir.join("status"))
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|_| "?".into());
+    let events_path = dir.join("events.jsonl");
+    Ok(SessionEntry { dir: dir.to_path_buf(), meta, status, events_path })
+}
+
 pub fn discover(root: &Path) -> Result<Vec<SessionEntry>> {
     let sessions = root.join("sessions");
     if !sessions.exists() { return Ok(Vec::new()); }

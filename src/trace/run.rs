@@ -1,9 +1,11 @@
-use crate::event::Event;
+use crate::event::{Event, EventData, EventKind, ProcessRef};
 use crate::trace::{
-    aggregator::Aggregator, eslogger, network, persist::Persist, pid_tree::PidTree,
+    aggregator::Aggregator, claude_transcript, eslogger, network, persist::Persist,
+    pid_tree::{self, PidTree},
     session::{Session, SessionStatus},
 };
 use anyhow::{anyhow, Context, Result};
+use std::collections::HashSet;
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -11,13 +13,21 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const RAW_CHAN_CAP: usize = 4096;
 const PERSIST_CHAN_CAP: usize = 8192;
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
-const ESLOGGER_READY_TIMEOUT: Duration = Duration::from_secs(10);
+const TREE_POLL_INTERVAL: Duration = Duration::from_millis(100);
+/// How long to wait for eslogger's first event when sudo is already cached
+/// (no prompt expected — events arrive within milliseconds if it's working).
+const ESLOGGER_READY_TIMEOUT: Duration = Duration::from_secs(8);
+/// Longer window when a sudo password prompt is expected first.
+const ESLOGGER_READY_TIMEOUT_PROMPT: Duration = Duration::from_secs(60);
 
+/// Launch a command, record it, and exit when it does. No TUI — the wrapped
+/// command owns the terminal (this is the `ctrace` / `ctrace claude` / `ctrace
+/// exec` path). To watch a running claude live instead, see `attach`.
 pub fn run(argv: Vec<String>, root: PathBuf) -> Result<i32> {
     if argv.is_empty() {
         return Err(anyhow!("trace requires a command"));
@@ -26,7 +36,66 @@ pub fn run(argv: Vec<String>, root: PathBuf) -> Result<i32> {
     let cwd = std::env::current_dir()?;
     let tracer_pid = std::process::id();
 
-    // Check whether sudo credentials are cached so we can warn the user early.
+    // Raw events channel — shared by eslogger (if active), the tree poller,
+    // the network poller, and the claude transcript tailer.
+    let (raw_tx, raw_rx) = mpsc::sync_channel::<Event>(RAW_CHAN_CAP);
+
+    // Bring eslogger up BEFORE spawning the wrapped child so the Endpoint
+    // Security client is registered first (avoids an early event-loss race).
+    let (eslogger_handle, eslogger_active) = bring_up_eslogger(raw_tx.clone());
+
+    // Build Command for the wrapped child — always runs as the current user.
+    let mut cmd = Command::new(&argv[0]);
+    cmd.args(&argv[1..])
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
+
+    let mut child = cmd.spawn().with_context(|| format!("spawn {:?}", argv[0]))?;
+    let child_pid = child.id();
+
+    let session = Session::create(&root, child_pid, tracer_pid, &argv, &cwd)?;
+    eprintln!("ctrace · recording to {}", session.dir().display());
+
+    let mut tree = PidTree::new(child_pid);
+    tree.seed_descendants();
+    let agg = Arc::new(Mutex::new(Aggregator::new(tree)));
+
+    emit_synthetic_root_exec(&raw_tx, child_pid, tracer_pid, &argv);
+
+    let persist = Arc::new(Persist::open(&session.events_path())?);
+    let (net_handle, tree_poll_handle, transcript_handle) =
+        start_poll_sources(child_pid, &cwd, eslogger_active, &agg, &raw_tx)?;
+
+    let (aggregator_handle, persist_handle) = spawn_pipeline(agg, persist, raw_rx);
+
+    let status = child.wait()?;
+    let exit_code = status.code().unwrap_or(-1);
+
+    shutdown_sources(eslogger_handle, net_handle, tree_poll_handle, transcript_handle);
+    drop(raw_tx);
+    aggregator_handle.join().ok();
+    persist_handle.join().ok();
+
+    session.mark_status(SessionStatus::Done)?;
+    eprintln!("ctrace · session ended · path: {}", session.dir().display());
+
+    Ok(exit_code)
+}
+
+/// What eslogger's reader thread reports back about its own startup.
+pub(crate) enum EsloggerSignal {
+    /// First event parsed — the ES client is live.
+    Ready,
+    /// The reader loop ended before any event (sudo declined / spawn failed /
+    /// stream closed). Used to degrade promptly instead of waiting the timeout.
+    Exited,
+}
+
+/// Try to start eslogger. Returns its stop-handle and whether it is actually
+/// active. On failure we print the poll-only degrade banner and return
+/// `(None, false)` — the caller carries on with the poll sources.
+pub(crate) fn bring_up_eslogger(raw_tx: SyncSender<Event>) -> (Option<ThreadStop>, bool) {
     let sudo_cached = Command::new("sudo")
         .args(["-n", "true"])
         .stdin(Stdio::null())
@@ -36,85 +105,153 @@ pub fn run(argv: Vec<String>, root: PathBuf) -> Result<i32> {
         .map(|s| s.success())
         .unwrap_or(false);
     if !sudo_cached {
-        eprintln!("peekaboo · sudo will prompt for your password to run eslogger…");
+        eprintln!("ctrace · sudo will prompt for your password to run eslogger…");
     }
 
-    // 1. Channels + ready signal.
-    let (raw_tx, raw_rx) = mpsc::sync_channel::<Event>(RAW_CHAN_CAP);
-    // ready_tx is sent to the eslogger thread; it fires once the first event arrives.
-    let (ready_tx, ready_rx) = mpsc::channel::<()>();
+    let (ready_tx, ready_rx) = mpsc::channel::<EsloggerSignal>();
+    let handle = match start_eslogger_thread(raw_tx, ready_tx) {
+        Ok(h) => h,
+        Err(e) => {
+            eprintln!("ctrace · eslogger failed to spawn: {e}");
+            print_degrade_banner();
+            return (None, false);
+        }
+    };
 
-    // 2. Start eslogger early (via sudo) so it has time to register its ES client.
-    //    stdin is inherited so sudo can prompt for a password on the terminal.
-    let eslogger_handle = start_eslogger_thread(raw_tx.clone(), ready_tx)?;
+    eprintln!("ctrace · waiting for eslogger to be ready (sudo may prompt)…");
+    let timeout = if sudo_cached {
+        ESLOGGER_READY_TIMEOUT
+    } else {
+        ESLOGGER_READY_TIMEOUT_PROMPT
+    };
+    match ready_rx.recv_timeout(timeout) {
+        Ok(EsloggerSignal::Ready) => {
+            eprintln!("ctrace · eslogger active — full event capture on.");
+            (Some(handle), true)
+        }
+        Ok(EsloggerSignal::Exited) | Err(_) => {
+            // Declined, failed, or never produced an event in time. Shut the
+            // thread down so a late-arriving eslogger can't clobber the tree
+            // poller's exec attribution, then degrade to poll-only.
+            handle.shutdown();
+            print_degrade_banner();
+            (None, false)
+        }
+    }
+}
 
-    // 3. Wait until eslogger is actually producing events (or timeout after 10 s).
-    eprintln!("peekaboo · waiting for eslogger to be ready (sudo may prompt)…");
-    let _ = ready_rx.recv_timeout(ESLOGGER_READY_TIMEOUT);
+fn print_degrade_banner() {
+    eprintln!("ctrace · eslogger unavailable (sudo declined or failed to start)");
+    eprintln!("ctrace · running poll-only: process tree + network + claude tool calls.");
+    eprintln!("         file open/write/delete events OFF.");
+}
 
-    // 4. Build Command for the wrapped child (runs as the current user — no uid/gid drop needed).
-    let mut cmd = Command::new(&argv[0]);
-    cmd.args(&argv[1..])
-        .stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit());
+/// Emit a synthetic Exec for the traced root process so the viewer's Process
+/// pane shows it as the root of the tree. In eslogger mode this may also arrive
+/// via ES; the aggregator/app dedupe by pid.
+pub(crate) fn emit_synthetic_root_exec(
+    raw_tx: &SyncSender<Event>,
+    pid: u32,
+    ppid: u32,
+    argv: &[String],
+) {
+    let exe = argv.first().cloned().unwrap_or_default();
+    let comm = std::path::Path::new(&exe)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(&exe)
+        .to_string();
+    let process = Arc::new(ProcessRef {
+        pid,
+        comm,
+        image: PathBuf::from(&exe),
+        argv: argv.to_vec(),
+    });
+    let _ = raw_tx.send(Event {
+        ts_ns: now_ns(),
+        kind: EventKind::Exec,
+        pid,
+        ppid,
+        process,
+        data: EventData::Exec {
+            argv: argv.to_vec(),
+            image: PathBuf::from(&exe),
+        },
+        flags: 0,
+    });
+}
 
-    // 5. Spawn the child now that eslogger is subscribed.
-    let mut child = cmd.spawn().with_context(|| format!("spawn {:?}", argv[0]))?;
-    let child_pid = child.id();
+/// Start the poll-based sources that run regardless of mode. The tree poller is
+/// started ONLY when eslogger is inactive, so it never clobbers eslogger's rich
+/// exec argv with bare `ps` basenames. The transcript tailer always runs — it
+/// captures claude's intent (which tool, exact Bash command), a different data
+/// class that doesn't collide with kernel events.
+pub(crate) fn start_poll_sources(
+    root_pid: u32,
+    cwd: &std::path::Path,
+    eslogger_active: bool,
+    agg: &Arc<Mutex<Aggregator>>,
+    raw_tx: &SyncSender<Event>,
+) -> Result<(ThreadStop, Option<ThreadStop>, Option<ThreadStop>)> {
+    let net_handle = start_network_thread(root_pid, agg.clone(), raw_tx.clone())?;
 
-    // 6. Session dir.
-    let session = Session::create(&root, child_pid, tracer_pid, &argv, &cwd)?;
-    eprintln!("peekaboo · recording to {}", session.dir().display());
+    let tree_poll_handle = if !eslogger_active {
+        Some(start_tree_poll_thread(root_pid, agg.clone(), raw_tx.clone())?)
+    } else {
+        None
+    };
 
-    // 7. pid_tree.
-    let mut tree = PidTree::new(child_pid);
-    tree.seed_descendants();
-    eprintln!(
-        "peekaboo · debug: root pid {child_pid}, seeded tree has {} pids: {:?}",
-        tree.len(),
-        tree.pids()
-    );
-    let agg = Arc::new(Mutex::new(Aggregator::new(tree)));
+    let transcript_handle =
+        match claude_transcript::start_transcript_thread(root_pid, cwd.to_path_buf(), raw_tx.clone())
+        {
+            Ok(h) => Some(h),
+            Err(e) => {
+                eprintln!("ctrace · claude transcript tailer failed to start: {e}");
+                None
+            }
+        };
 
-    // 8. Persist + network + aggregator threads.
-    let persist = Arc::new(Persist::open(&session.events_path())?);
-    let agg_for_net = agg.clone();
-    let net_raw_tx = raw_tx.clone();
-    let net_handle = start_network_thread(child_pid, agg_for_net, net_raw_tx)?;
+    Ok((net_handle, tree_poll_handle, transcript_handle))
+}
+
+pub(crate) fn shutdown_sources(
+    eslogger_handle: Option<ThreadStop>,
+    net_handle: ThreadStop,
+    tree_poll_handle: Option<ThreadStop>,
+    transcript_handle: Option<ThreadStop>,
+) {
+    if let Some(h) = eslogger_handle {
+        h.shutdown();
+    }
+    net_handle.shutdown();
+    if let Some(h) = tree_poll_handle {
+        h.shutdown();
+    }
+    if let Some(h) = transcript_handle {
+        h.shutdown();
+    }
+}
+
+/// Spawn the aggregator + persist threads that drain `raw_rx`, coalesce bursts,
+/// and write JSONL. Returns their join handles; drop the raw sender to stop them.
+pub(crate) fn spawn_pipeline(
+    agg: Arc<Mutex<Aggregator>>,
+    persist: Arc<Persist>,
+    raw_rx: mpsc::Receiver<Event>,
+) -> (thread::JoinHandle<()>, thread::JoinHandle<()>) {
     let (persist_tx, persist_rx) = mpsc::sync_channel::<Event>(PERSIST_CHAN_CAP);
     let agg_for_loop = agg.clone();
     let aggregator_handle = thread::spawn(move || {
-        let mut raw_count = 0usize;
-        let mut post_filter_count = 0usize;
-        let mut samples_printed = 0usize;
         for raw in raw_rx {
-            raw_count += 1;
-            if samples_printed < 10 {
-                eprintln!(
-                    "peekaboo · debug: raw event #{}: kind={:?} pid={} ppid={}",
-                    samples_printed + 1,
-                    raw.kind,
-                    raw.pid,
-                    raw.ppid,
-                );
-                samples_printed += 1;
-            }
             let mut g = agg_for_loop.lock().unwrap();
             for ev in g.process(raw) {
-                post_filter_count += 1;
                 let _ = persist_tx.send(ev);
             }
         }
         let mut g = agg_for_loop.lock().unwrap();
         for ev in g.flush() {
-            post_filter_count += 1;
             let _ = persist_tx.send(ev);
         }
-        eprintln!(
-            "peekaboo · debug: raw={raw_count} post-filter={post_filter_count} tree-final-size={}",
-            g.tree_len()
-        );
         drop(persist_tx);
     });
     let persist_for_writer = persist.clone();
@@ -124,22 +261,24 @@ pub fn run(argv: Vec<String>, root: PathBuf) -> Result<i32> {
         }
         let _ = persist_for_writer.flush();
     });
+    (aggregator_handle, persist_handle)
+}
 
-    // 9. Wait for child + shutdown.
-    let status = child.wait()?;
-    let exit_code = status.code().unwrap_or(-1);
-
-    eslogger_handle.shutdown();
-    net_handle.shutdown();
-    drop(raw_tx);
-    aggregator_handle.join().ok();
-    persist_handle.join().ok();
-
-    session.mark_status(SessionStatus::Done)?;
-    // Session is owned by the user from the start — no chown needed.
-    eprintln!("peekaboo · session ended · path: {}", session.dir().display());
-
-    Ok(exit_code)
+/// Flush the persist buffer on a timer. Wrap mode flushes at exit, but the
+/// live attach TUI tails the JSONL as it's written, so it needs the bytes on
+/// disk promptly during quiet stretches (Persist otherwise only flushes every
+/// 256 events).
+pub(crate) fn start_flush_thread(persist: Arc<Persist>, interval: Duration) -> ThreadStop {
+    let flag = Arc::new(AtomicBool::new(false));
+    let stop = flag.clone();
+    let h = thread::spawn(move || {
+        while !stop.load(Ordering::SeqCst) {
+            thread::sleep(interval);
+            let _ = persist.flush();
+        }
+        let _ = persist.flush();
+    });
+    ThreadStop::new(flag, h)
 }
 
 pub struct ThreadStop {
@@ -148,7 +287,11 @@ pub struct ThreadStop {
 }
 
 impl ThreadStop {
-    fn shutdown(mut self) {
+    pub(crate) fn new(flag: Arc<AtomicBool>, join: thread::JoinHandle<()>) -> Self {
+        Self { flag, join: Some(join) }
+    }
+
+    pub(crate) fn shutdown(mut self) {
         self.flag.store(true, Ordering::SeqCst);
         if let Some(h) = self.join.take() {
             let _ = h.join();
@@ -156,14 +299,17 @@ impl ThreadStop {
     }
 }
 
-fn start_eslogger_thread(tx: SyncSender<Event>, ready_tx: mpsc::Sender<()>) -> Result<ThreadStop> {
+fn start_eslogger_thread(
+    tx: SyncSender<Event>,
+    ready_tx: mpsc::Sender<EsloggerSignal>,
+) -> Result<ThreadStop> {
     let flag = Arc::new(AtomicBool::new(false));
     let stop = flag.clone();
     let h = thread::spawn(move || {
         // Run eslogger via sudo so it lands in a different audit session from the
         // wrapped child process.  stdin is inherited so sudo can prompt for a password.
         let mut child = match Command::new("/usr/bin/sudo")
-            .args(["/usr/bin/eslogger", "exec", "fork", "exit", "open", "close", "create", "write"])
+            .args(["/usr/bin/eslogger", "exec", "fork", "exit", "open", "close", "create", "write", "unlink", "rename"])
             .stdin(Stdio::inherit())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -171,28 +317,25 @@ fn start_eslogger_thread(tx: SyncSender<Event>, ready_tx: mpsc::Sender<()>) -> R
         {
             Ok(c) => c,
             Err(e) => {
-                eprintln!("peekaboo · CRITICAL: failed to spawn sudo eslogger: {e}");
+                eprintln!("ctrace · CRITICAL: failed to spawn sudo eslogger: {e}");
+                let _ = ready_tx.send(EsloggerSignal::Exited);
                 return;
             }
         };
 
-        // Drain eslogger's stderr in a background thread so it doesn't block.
         if let Some(stderr) = child.stderr.take() {
             thread::spawn(move || {
                 let reader = BufReader::new(stderr);
                 for line in reader.lines().flatten() {
-                    eprintln!("peekaboo · eslogger stderr: {line}");
+                    eprintln!("ctrace · eslogger stderr: {line}");
                 }
             });
         }
 
         let stdout = child.stdout.take().unwrap();
         let reader = BufReader::new(stdout);
-        let raw_seen = AtomicUsize::new(0);
         let event_count = AtomicUsize::new(0);
         let parse_errors = AtomicUsize::new(0);
-        let unknown_count = AtomicUsize::new(0);
-        // Use Option so we can take() it after the first send (avoids clone).
         let mut ready_tx = Some(ready_tx);
         for line in reader.lines() {
             if stop.load(Ordering::SeqCst) {
@@ -202,48 +345,38 @@ fn start_eslogger_thread(tx: SyncSender<Event>, ready_tx: mpsc::Sender<()>) -> R
                 Ok(l) => l,
                 Err(_) => break,
             };
-            raw_seen.fetch_add(1, Ordering::Relaxed);
             match eslogger::parse_line(&line) {
                 Ok(Some(ev)) => {
-                    // Signal ready on the very first successfully parsed event.
                     if let Some(tx) = ready_tx.take() {
-                        let _ = tx.send(());
+                        let _ = tx.send(EsloggerSignal::Ready);
                     }
                     event_count.fetch_add(1, Ordering::Relaxed);
                     if tx.send(ev).is_err() {
                         break;
                     }
                 }
-                Ok(None) => {
-                    unknown_count.fetch_add(1, Ordering::Relaxed);
-                }
+                Ok(None) => {}
                 Err(e) => {
                     let n = parse_errors.fetch_add(1, Ordering::Relaxed) + 1;
                     if n == 1 || n % 100 == 0 {
-                        eprintln!("peekaboo · eslogger parse error (#{n}): {e}");
+                        eprintln!("ctrace · eslogger parse error (#{n}): {e}");
                     }
                 }
             }
         }
 
-        let total_raw = raw_seen.load(Ordering::Relaxed);
-        let total_events = event_count.load(Ordering::Relaxed);
-        let total_unknown = unknown_count.load(Ordering::Relaxed);
-        let total_errors = parse_errors.load(Ordering::Relaxed);
-        eprintln!(
-            "peekaboo · debug: eslogger raw-lines={total_raw} parsed-ok={total_events} \
-             unrecognized={total_unknown} parse-errors={total_errors}"
-        );
-        if total_events == 0 {
-            eprintln!(
-                "peekaboo · WARNING: no eslogger events recorded; \
-                check Full Disk Access for your terminal app"
-            );
+        // If we ended the read loop without ever signalling Ready, the client
+        // never came up (sudo declined / closed). Tell the waiter so it can
+        // degrade immediately rather than blocking on the timeout.
+        if let Some(tx) = ready_tx.take() {
+            let _ = tx.send(EsloggerSignal::Exited);
         }
 
-        let unk = unknown_count.load(Ordering::Relaxed);
-        if unk > 0 {
-            eprintln!("peekaboo · note: {unk} eslogger lines had unrecognized event payload");
+        if event_count.load(Ordering::Relaxed) == 0 {
+            eprintln!(
+                "ctrace · WARNING: no eslogger events recorded; \
+                check Full Disk Access for your terminal app"
+            );
         }
 
         let _ = child.kill();
@@ -330,14 +463,64 @@ fn start_network_thread(
     })
 }
 
+/// Poll the OS process table periodically and emit synthetic Exec events for
+/// any descendants of `root_pid` we haven't sent before.  The aggregator will
+/// grow its tree from these events the same way it does from eslogger.
+fn start_tree_poll_thread(
+    root_pid: u32,
+    _agg: Arc<Mutex<Aggregator>>,
+    tx: SyncSender<Event>,
+) -> Result<ThreadStop> {
+    let flag = Arc::new(AtomicBool::new(false));
+    let stop = flag.clone();
+    let h = thread::spawn(move || {
+        let mut seen: HashSet<u32> = HashSet::from([root_pid]);
+        while !stop.load(Ordering::SeqCst) {
+            if let Ok(descendants) = pid_tree::list_descendants_with_comm(root_pid) {
+                let ts = now_ns();
+                for (pid, ppid, comm) in descendants {
+                    if !seen.insert(pid) {
+                        continue;
+                    }
+                    let process = Arc::new(ProcessRef {
+                        pid,
+                        comm: comm.clone(),
+                        image: PathBuf::new(),
+                        argv: vec![comm.clone()],
+                    });
+                    let ev = Event {
+                        ts_ns: ts,
+                        kind: EventKind::Exec,
+                        pid,
+                        ppid,
+                        process,
+                        data: EventData::Exec {
+                            argv: vec![comm],
+                            image: PathBuf::new(),
+                        },
+                        flags: 0,
+                    };
+                    if tx.send(ev).is_err() {
+                        return;
+                    }
+                }
+            }
+            thread::sleep(TREE_POLL_INTERVAL);
+        }
+    });
+    Ok(ThreadStop {
+        flag,
+        join: Some(h),
+    })
+}
+
 fn collect_pids(agg: &Arc<Mutex<Aggregator>>) -> Vec<u32> {
     agg.lock().unwrap().pids()
 }
 
-fn now_ns() -> u64 {
-    use std::time::SystemTime;
+pub(crate) fn now_ns() -> u64 {
     SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
+        .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos() as u64
 }

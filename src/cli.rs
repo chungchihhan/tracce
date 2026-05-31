@@ -2,25 +2,49 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
-#[command(name = "peekaboo", version, about = "macOS tracer for Claude Code sessions")]
+#[command(
+    name = "ctrace",
+    version,
+    about = "macOS tracer for Claude Code sessions",
+    long_about = "Trace what a Claude Code session does on your machine.\n\n\
+                  Run `ctrace` (or `ctrace claude …`) to launch and record claude.\n\
+                  Run `ctrace attach` in a second terminal to watch a running\n\
+                  claude live. Run `ctrace view` to replay a recorded session."
+)]
 pub struct Cli {
     #[command(subcommand)]
-    pub command: Cmd,
+    pub command: Option<Cmd>,
 }
 
 #[derive(Subcommand, Debug)]
 pub enum Cmd {
-    /// Run a command under tracing (requires sudo).
-    Trace {
+    /// Launch and record a Claude Code session (this is the default when no
+    /// subcommand is given). claude owns the terminal, so no TUI is drawn —
+    /// replay the recording later with `ctrace view`.
+    Claude {
+        /// Arguments forwarded verbatim to `claude`.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Attach to an already-running claude: record AND render the live TUI in
+    /// this terminal. The only mode that shows a live dashboard.
+    Attach {
+        /// PID of the running claude. Omit to auto-find the running claude
+        /// (or pick from a list if several are running).
+        pid: Option<u32>,
+    },
+    /// Launch and record an arbitrary command — a testing hatch for exercising
+    /// ctrace's features without claude in the loop. e.g. `ctrace exec -- npm test`.
+    Exec {
         /// The command and its arguments to trace.
         #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
         argv: Vec<String>,
     },
-    /// Render a session in the TUI.
+    /// Replay a recorded session in the TUI.
     View {
         /// Session id (directory name) or path to events.jsonl. Omit to use picker.
         target: Option<String>,
-        /// Open the most recently started live session without showing a picker.
+        /// Open the most recently started session without showing a picker.
         #[arg(long)]
         latest: bool,
         /// Do not tail the file; render a static snapshot.
@@ -42,9 +66,9 @@ pub fn parse() -> Cli {
 
 #[allow(dead_code)]
 pub fn root_dir() -> PathBuf {
-    if let Ok(p) = std::env::var("PEEKABOO_HOME") {
+    if let Ok(p) = std::env::var("CTRACE_HOME") {
         return PathBuf::from(p);
     }
     let home = std::env::var("HOME").expect("HOME must be set");
-    PathBuf::from(home).join(".peekaboo")
+    PathBuf::from(home).join(".ctrace")
 }

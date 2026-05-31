@@ -21,10 +21,42 @@ impl Tail {
     }
 
     /// Drain available lines, then if `follow`, wait up to `budget` for more.
+    /// Existing callers stay on the unbounded version.
     pub fn drain(&mut self, budget: Duration) -> Result<Vec<Event>> {
+        self.drain_up_to(budget, usize::MAX)
+    }
+
+    /// Same as `drain` but stops after `max_lines` parsed events.
+    /// Lets the UI redraw between chunks instead of blocking on huge files.
+    pub fn drain_up_to(&mut self, budget: Duration, max_lines: usize) -> Result<Vec<Event>> {
         let mut out = Vec::new();
-        // First: drain whatever is currently available.
-        loop {
+        self.read_available(&mut out, max_lines)?;
+        if !self.follow || out.len() >= max_lines {
+            return Ok(out);
+        }
+        // Poll for new bytes until budget exhausted or something shows up.
+        let deadline = Instant::now() + budget;
+        while Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(40));
+            // Re-open the file to pick up writes flushed by another process/handle.
+            // BufReader on the same file handle may not see appended data after EOF
+            // without seeking back; re-opening is more reliable.
+            let pos = self.reader.stream_position()?;
+            let f = std::fs::File::open(&self.path)?;
+            let mut new_reader = BufReader::new(f);
+            new_reader.seek(SeekFrom::Start(pos))?;
+            let before = out.len();
+            self.reader = new_reader;
+            self.read_available(&mut out, max_lines)?;
+            if out.len() > before {
+                break;
+            }
+        }
+        Ok(out)
+    }
+
+    fn read_available(&mut self, out: &mut Vec<Event>, max_lines: usize) -> Result<()> {
+        while out.len() < max_lines {
             let mut line = String::new();
             match self.reader.read_line(&mut line)? {
                 0 => break,
@@ -38,49 +70,6 @@ impl Tail {
                 }
             }
         }
-        if !self.follow {
-            return Ok(out);
-        }
-        // Poll until budget exhausted.
-        let deadline = Instant::now() + budget;
-        while Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(40));
-            // Re-open the file to pick up writes flushed by another process/handle.
-            // BufReader on the same file handle may not see appended data after EOF
-            // without seeking back; re-opening is more reliable.
-            let pos = self.reader.stream_position()?;
-            let f = std::fs::File::open(&self.path)?;
-            let mut new_reader = BufReader::new(f);
-            new_reader.seek(SeekFrom::Start(pos))?;
-            let mut line = String::new();
-            if new_reader.read_line(&mut line)? > 0 {
-                self.reader = new_reader;
-                let trimmed = line.trim();
-                if !trimmed.is_empty() {
-                    if let Ok(ev) = serde_json::from_str::<Event>(trimmed) {
-                        out.push(ev);
-                    }
-                }
-                // Drain any additional lines that may have appeared.
-                loop {
-                    let mut more = String::new();
-                    match self.reader.read_line(&mut more)? {
-                        0 => break,
-                        _ => {
-                            let trimmed = more.trim();
-                            if !trimmed.is_empty() {
-                                if let Ok(ev) = serde_json::from_str::<Event>(trimmed) {
-                                    out.push(ev);
-                                }
-                            }
-                        }
-                    }
-                }
-                // If we found lines, we can stop polling early.
-                break;
-            }
-            // Nothing new yet; continue polling with original reader.
-        }
-        Ok(out)
+        Ok(())
     }
 }

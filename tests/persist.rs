@@ -1,5 +1,5 @@
-use peekaboo::event::{Event, EventData, EventKind, ProcessRef};
-use peekaboo::trace::persist::Persist;
+use ctrace::event::{Event, EventData, EventKind, ProcessRef};
+use ctrace::trace::persist::Persist;
 use std::sync::Arc;
 use tempfile::NamedTempFile;
 

@@ -1,4 +1,4 @@
-use peekaboo::event::{Event, EventData, EventKind, FileOp, NetProto, ProcessRef};
+use ctrace::event::{Event, EventData, EventKind, FileOp, NetProto, ProcessRef};
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -45,11 +45,11 @@ fn roundtrip_file_event_with_sensitive_flag() {
             path: "/Users/x/.aws/credentials".into(),
             size: None,
         },
-        flags: peekaboo::event::FLAG_SENSITIVE,
+        flags: ctrace::event::FLAG_SENSITIVE,
     };
     let line = serde_json::to_string(&e).unwrap();
     let back: Event = serde_json::from_str(&line).unwrap();
-    assert_eq!(back.flags & peekaboo::event::FLAG_SENSITIVE, peekaboo::event::FLAG_SENSITIVE);
+    assert_eq!(back.flags & ctrace::event::FLAG_SENSITIVE, ctrace::event::FLAG_SENSITIVE);
 }
 
 #[test]

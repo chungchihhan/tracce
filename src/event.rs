@@ -19,13 +19,14 @@ pub struct ProcessRef {
 #[serde(rename_all = "snake_case")]
 pub enum EventKind {
     Exec, Fork, Exit,
-    Open, Write, Create, Close,
+    Open, Write, Create, Close, Unlink, Rename,
+    Edit, MultiEdit, Bash,
     NetOpen, NetClose,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum FileOp { Open, Write, Create, Close }
+pub enum FileOp { Open, Write, Create, Close, Delete, Rename, Edit, MultiEdit, Bash }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]

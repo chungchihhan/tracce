@@ -1,13 +1,13 @@
 use std::process::Command;
 use tempfile::TempDir;
 
-fn bin() -> Command { Command::new(env!("CARGO_BIN_EXE_peekaboo")) }
+fn bin() -> Command { Command::new(env!("CARGO_BIN_EXE_ctrace")) }
 
 #[test]
 fn list_empty_root_succeeds_with_header_only() {
     let root = TempDir::new().unwrap();
     let out = bin()
-        .env("PEEKABOO_HOME", root.path())
+        .env("CTRACE_HOME", root.path())
         .arg("list")
         .output().unwrap();
     assert!(out.status.success());
@@ -36,11 +36,11 @@ fn list_with_one_session_shows_one_row() {
         "tracer_pid": 4710,
         "hostname": "h",
         "macos_version": "15.4",
-        "peekaboo_version": "0.1.0"
+        "ctrace_version": "0.1.0"
     }"#).unwrap();
 
     let out = bin()
-        .env("PEEKABOO_HOME", root.path())
+        .env("CTRACE_HOME", root.path())
         .arg("list")
         .output().unwrap();
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
