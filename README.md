@@ -58,6 +58,18 @@ If a trace crashes and leaves files in an odd state, run:
 ctrace fix-perms
 ```
 
+## The dashboard
+
+`attach` and `view` render a live grid of panels:
+
+- **PROCESS TREE** (`1`) — the descendant process tree by pid, with each command name and its event count
+- **ACTIVITY** (`2`) — recent file operations (`R` read · `W` write · `C` create · `X` close · `D` delete · `M` move · `E` edit · `A` multi-edit · `$` bash), with a `⚠` on sensitive paths and `(burst)` on coalesced bursts
+- **COMMANDS** (`3`) — exec'd command lines (full argv)
+- **NETWORK** (`4`) — remote hosts and their connection counts
+- **EVENTS/s** (`5`) — a one-minute sparkline of the event rate, sitting beside NETWORK
+
+Keys: `Tab` / `Shift-Tab` move focus · `1`–`5` show/hide panels · `j`/`k` (or arrows) scroll · `g`/`G` jump to top/bottom · `f` or `/` filter the focused pane · `p` pause · `h` (or `?`) help · `q` / `Esc` quit · `Ctrl-C` quit immediately.
+
 ## How it works
 
 - Process and file events come from `/usr/bin/eslogger` (macOS Endpoint Security), on by default
