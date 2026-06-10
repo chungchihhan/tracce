@@ -4,7 +4,7 @@ use crossterm::event::{self, Event as CtEvent, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Clear, List, ListItem, Padding, Paragraph, Sparkline};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListState, Padding, Paragraph, Sparkline};
 use ratatui::Frame;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
@@ -34,7 +34,14 @@ const PANE_ORDER: [Pane; 4] = [Pane::Process, Pane::File, Pane::Commands, Pane::
 /// Which interaction mode the UI is in. Only `Normal` runs navigation keys; the
 /// others are transient overlays/input modes that capture the keyboard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Mode { Normal, Help, QuitConfirm, Filter }
+pub enum Mode { Normal, Help, QuitConfirm, Filter, Detail }
+
+/// A frozen snapshot of one row's full fields, shown in the detail modal. Built
+/// at the moment Enter is pressed so live updates can't shift it under the user.
+struct DetailView {
+    title: String,
+    rows: Vec<(String, String)>,
+}
 
 pub struct App {
     pub session: SessionEntry,
@@ -53,10 +60,12 @@ pub struct App {
     filters: [String; 4],
     /// Live text being typed while in `Mode::Filter`, not yet committed.
     filter_draft: String,
-    process_scroll: usize,
-    file_scroll: usize,
-    commands_scroll: usize,
-    network_scroll: usize,
+    /// Per-pane list selection + viewport. `selected == None` means "follow the
+    /// latest" (no highlight, pinned to the newest row); `Some(i)` is browse mode
+    /// with a highlighted row. Indexed parallel to `PANE_ORDER`.
+    list_state: [ListState; 4],
+    /// Frozen detail snapshot for `Mode::Detail`; `None` outside it.
+    detail: Option<DetailView>,
 
     // derived state
     pub processes: HashMap<u32, ProcInfo>,
@@ -73,10 +82,10 @@ pub struct App {
     last_event_ns: u64,
 }
 
-pub struct ProcInfo { pub pid: u32, pub comm: String, pub ppid: u32, pub event_count: usize }
-pub struct FileRow { pub pid: u32, pub comm: String, pub op: char, pub path: PathBuf, pub sensitive: bool, pub coalesced: bool }
-pub struct CommandRow { pub pid: u32, pub argv: String }
-pub struct NetRow { pub host: String, pub conns: usize }
+pub struct ProcInfo { pub pid: u32, pub comm: String, pub ppid: u32, pub event_count: usize, pub last_ts_ns: u64 }
+pub struct FileRow { pub pid: u32, pub comm: String, pub op: char, pub path: PathBuf, pub sensitive: bool, pub coalesced: bool, pub ts_ns: u64 }
+pub struct CommandRow { pub pid: u32, pub argv: String, pub ts_ns: u64 }
+pub struct NetRow { pub host: String, pub conns: usize, pub last_ts_ns: u64 }
 
 impl App {
     pub fn new(session: SessionEntry) -> Self {
@@ -92,10 +101,8 @@ impl App {
             show_events: true,
             filters: [String::new(), String::new(), String::new(), String::new()],
             filter_draft: String::new(),
-            process_scroll: 0,
-            file_scroll: 0,
-            commands_scroll: 0,
-            network_scroll: 0,
+            list_state: std::array::from_fn(|_| ListState::default()),
+            detail: None,
             processes: HashMap::new(),
             recent_files: Vec::new(),
             commands: Vec::new(),
@@ -119,7 +126,17 @@ impl App {
             Mode::Help => self.mode = Mode::Normal, // any key dismisses help
             Mode::QuitConfirm => self.handle_quit_key(key),
             Mode::Filter => self.handle_filter_key(key),
+            Mode::Detail => self.handle_detail_key(key),
             Mode::Normal => self.handle_normal_key(key),
+        }
+    }
+
+    /// In the detail modal, Esc / Enter / q return to the dashboard. Other keys
+    /// are inert so a stray press can't quit or navigate underneath.
+    fn handle_detail_key(&mut self, key: KeyEvent) {
+        if matches!(key.code, KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q')) {
+            self.mode = Mode::Normal;
+            self.detail = None;
         }
     }
 
@@ -140,7 +157,7 @@ impl App {
                 let i = pane_index(self.focus);
                 self.filters[i] = std::mem::take(&mut self.filter_draft);
                 self.mode = Mode::Normal;
-                self.clamp_scroll();
+                self.clamp_selection();
             }
             KeyCode::Backspace => { self.filter_draft.pop(); }
             KeyCode::Char(c) => self.filter_draft.push(c),
@@ -158,7 +175,7 @@ impl App {
                     self.mode = Mode::QuitConfirm;
                 } else {
                     self.filters[i].clear();
-                    self.clamp_scroll();
+                    self.clamp_selection();
                 }
             }
             (KeyCode::Char('h'), _) | (KeyCode::Char('?'), _) | (KeyCode::F(1), _) => {
@@ -177,12 +194,13 @@ impl App {
             (KeyCode::Char('4'), _) => self.toggle_visible(Pane::Network),
             (KeyCode::Char('5'), _) => self.show_events = !self.show_events,
             (KeyCode::Char('p'), _) => self.paused = !self.paused,
-            (KeyCode::Char('j'), _) | (KeyCode::Down, _)  => self.scroll(1),
-            (KeyCode::Char('k'), _) | (KeyCode::Up, _)    => self.scroll(-1),
-            (KeyCode::PageDown, _)                        => self.scroll(10),
-            (KeyCode::PageUp, _)                          => self.scroll(-10),
-            (KeyCode::Char('g'), _) | (KeyCode::Home, _)  => self.scroll_to(0),
-            (KeyCode::Char('G'), _) | (KeyCode::End, _)   => self.scroll_to(usize::MAX),
+            (KeyCode::Char('j'), _) | (KeyCode::Down, _)  => self.sel_move(1),
+            (KeyCode::Char('k'), _) | (KeyCode::Up, _)    => self.sel_move(-1),
+            (KeyCode::PageDown, _)                        => self.sel_move(10),
+            (KeyCode::PageUp, _)                          => self.sel_move(-10),
+            (KeyCode::Char('g'), _) | (KeyCode::Home, _)  => self.sel_follow(),
+            (KeyCode::Char('G'), _) | (KeyCode::End, _)   => self.sel_end(),
+            (KeyCode::Enter, _)                           => self.open_detail(),
             _ => {}
         }
     }
@@ -227,34 +245,147 @@ impl App {
         }
     }
 
-    fn scroll_mut(&mut self) -> &mut usize {
-        match self.focus {
-            Pane::Process => &mut self.process_scroll,
-            Pane::File => &mut self.file_scroll,
-            Pane::Commands => &mut self.commands_scroll,
-            Pane::Network => &mut self.network_scroll,
+    fn focus_state(&mut self) -> &mut ListState {
+        &mut self.list_state[pane_index(self.focus)]
+    }
+
+    fn focus_selected(&self) -> Option<usize> {
+        self.list_state[pane_index(self.focus)].selected()
+    }
+
+    /// Move the focused pane's selection by `delta` rows. From follow mode
+    /// (`None`), a downward move enters browse mode at the top; an upward move
+    /// stays in follow mode. Moving up off the top row returns to follow mode
+    /// (highlight off, pinned to newest).
+    fn sel_move(&mut self, delta: i64) {
+        let len = self.focus_len();
+        if len == 0 { return; }
+        let st = self.focus_state();
+        let next = match st.selected() {
+            None => if delta > 0 { Some(0) } else { None },
+            Some(i) => {
+                if delta < 0 && i == 0 {
+                    None
+                } else {
+                    Some((i as i64 + delta).clamp(0, len as i64 - 1) as usize)
+                }
+            }
+        };
+        st.select(next);
+    }
+
+    /// `g` / Home: resume following the latest (drop the highlight).
+    fn sel_follow(&mut self) {
+        self.focus_state().select(None);
+    }
+
+    /// `G` / End: jump to and highlight the last (oldest) row.
+    fn sel_end(&mut self) {
+        let len = self.focus_len();
+        if len > 0 {
+            self.focus_state().select(Some(len - 1));
         }
     }
 
-    fn scroll(&mut self, delta: i64) {
-        let max = self.focus_len();
-        let s = self.scroll_mut();
-        let next = (*s as i64 + delta).max(0) as usize;
-        *s = next.min(max.saturating_sub(1));
+    /// Re-clamp the focused pane's selection after its row count shrinks (e.g. a
+    /// filter was applied/cleared) so it never points past the end.
+    fn clamp_selection(&mut self) {
+        let len = self.focus_len();
+        let st = self.focus_state();
+        match st.selected() {
+            Some(_) if len == 0 => st.select(None),
+            Some(i) if i >= len => st.select(Some(len - 1)),
+            _ => {}
+        }
     }
 
-    fn scroll_to(&mut self, pos: usize) {
-        let max = self.focus_len();
-        let s = self.scroll_mut();
-        *s = pos.min(max.saturating_sub(1));
+    /// Keep a browsing selection glued to the same logical row when a new row is
+    /// inserted at the front (ACTIVITY / COMMANDS). Skipped in follow mode
+    /// (`None`) and when a filter is active (front-insert may not match, so the
+    /// index shift is unreliable).
+    fn glue_selection(&mut self, pane: Pane, len: usize) {
+        let i = pane_index(pane);
+        if !self.filters[i].is_empty() { return; }
+        if let Some(sel) = self.list_state[i].selected() {
+            self.list_state[i].select(Some((sel + 1).min(len.saturating_sub(1))));
+        }
     }
 
-    /// Re-clamp the focused pane's scroll offset after its row count shrinks
-    /// (e.g. a filter was applied/cleared).
-    fn clamp_scroll(&mut self) {
-        let max = self.focus_len();
-        let s = self.scroll_mut();
-        *s = (*s).min(max.saturating_sub(1));
+    /// Open the detail modal for the focused pane's selected row (or the top row
+    /// when still following). No-op if the pane has no rows.
+    fn open_detail(&mut self) {
+        let idx = self.focus_selected().unwrap_or(0);
+        if let Some(dv) = self.build_detail(self.focus, idx) {
+            self.detail = Some(dv);
+            self.mode = Mode::Detail;
+        }
+    }
+
+    /// Snapshot the full (untruncated) fields of one row for the detail modal.
+    fn build_detail(&self, pane: Pane, idx: usize) -> Option<DetailView> {
+        match pane {
+            Pane::Process => {
+                let rows = self.filtered_proc_rows();
+                let (pid, _) = rows.get(idx)?;
+                let p = self.processes.get(pid)?;
+                Some(DetailView {
+                    title: " Process detail ".into(),
+                    rows: vec![
+                        ("Command".into(), p.comm.clone()),
+                        ("PID".into(), p.pid.to_string()),
+                        ("Parent".into(), p.ppid.to_string()),
+                        ("Events".into(), p.event_count.to_string()),
+                        ("Last seen".into(), self.rel_time(p.last_ts_ns)),
+                    ],
+                })
+            }
+            Pane::File => {
+                let rows = self.filtered_files();
+                let r = rows.get(idx)?;
+                Some(DetailView {
+                    title: " Activity detail ".into(),
+                    rows: vec![
+                        ("Operation".into(), format!("{} ({})", op_name(r.op), r.op)),
+                        ("Path".into(), r.path.display().to_string()),
+                        ("Process".into(), format!("{} (pid {})", r.comm, r.pid)),
+                        ("Sensitive".into(), if r.sensitive { "⚠  yes".into() } else { "no".into() }),
+                        ("Burst".into(), if r.coalesced { "yes (coalesced)".into() } else { "no".into() }),
+                        ("When".into(), self.rel_time(r.ts_ns)),
+                    ],
+                })
+            }
+            Pane::Commands => {
+                let rows = self.filtered_commands();
+                let r = rows.get(idx)?;
+                Some(DetailView {
+                    title: " Command detail ".into(),
+                    rows: vec![
+                        ("PID".into(), r.pid.to_string()),
+                        ("Argv".into(), r.argv.clone()),
+                        ("When".into(), self.rel_time(r.ts_ns)),
+                    ],
+                })
+            }
+            Pane::Network => {
+                let rows = self.filtered_network();
+                let r = rows.get(idx)?;
+                Some(DetailView {
+                    title: " Network detail ".into(),
+                    rows: vec![
+                        ("Host".into(), r.host.clone()),
+                        ("Connections".into(), r.conns.to_string()),
+                        ("Last seen".into(), self.rel_time(r.last_ts_ns)),
+                    ],
+                })
+            }
+        }
+    }
+
+    /// Format an event timestamp as time-into-the-session, e.g. `+1:23`.
+    fn rel_time(&self, ts_ns: u64) -> String {
+        let Some(start) = self.first_event_ns else { return "—".into() };
+        let secs = ts_ns.saturating_sub(start) / 1_000_000_000;
+        format!("+{}:{:02}", secs / 60, secs % 60)
     }
 
     // --- filtered views ---------------------------------------------------
@@ -336,8 +467,10 @@ impl App {
                 comm: default_comm,
                 ppid: target_ppid,
                 event_count: 0,
+                last_ts_ns: ev.ts_ns,
             });
             info.event_count += 1;
+            info.last_ts_ns = ev.ts_ns;
             if let Exec { argv, .. } = &ev.data {
                 // argv[0] is the raw invoked path (e.g. "/usr/bin/rg"); the tree
                 // wants the clean command name. Basename it, falling back to the
@@ -362,8 +495,9 @@ impl App {
                 // Joining with spaces works for both shapes.
                 let joined = argv.join(" ");
                 if !joined.is_empty() {
-                    self.commands.insert(0, CommandRow { pid: ev.pid, argv: joined });
+                    self.commands.insert(0, CommandRow { pid: ev.pid, argv: joined, ts_ns: ev.ts_ns });
                     if self.commands.len() > 500 { self.commands.truncate(500); }
+                    self.glue_selection(Pane::Commands, self.commands.len());
                 }
             }
             Fork { .. } | Exit { .. } => {}
@@ -388,12 +522,17 @@ impl App {
                     path: path.clone(),
                     sensitive: ev.flags & crate::event::FLAG_SENSITIVE != 0,
                     coalesced: ev.flags & crate::event::FLAG_COALESCED != 0,
+                    ts_ns: ev.ts_ns,
                 });
                 if self.recent_files.len() > 200 { self.recent_files.truncate(200); }
+                self.glue_selection(Pane::File, self.recent_files.len());
             }
             NetOpen { host, remote, .. } => {
                 let key = host.clone().unwrap_or_else(|| remote.ip().to_string());
-                self.network.entry(key.clone()).or_insert(NetRow { host: key, conns: 0 }).conns += 1;
+                let row = self.network.entry(key.clone())
+                    .or_insert(NetRow { host: key, conns: 0, last_ts_ns: ev.ts_ns });
+                row.conns += 1;
+                row.last_ts_ns = ev.ts_ns;
             }
             NetClose { .. } => {}
         }
@@ -409,7 +548,7 @@ impl App {
         Ok(())
     }
 
-    pub fn draw(&self, f: &mut Frame) {
+    pub fn draw(&mut self, f: &mut Frame) {
         let area = f.area();
         let v = Layout::default()
             .direction(Direction::Vertical)
@@ -426,6 +565,7 @@ impl App {
         match self.mode {
             Mode::Help => { dim_backdrop(f, area); self.draw_help(f, area); }
             Mode::QuitConfirm => { dim_backdrop(f, area); self.draw_quit(f, area); }
+            Mode::Detail => { dim_backdrop(f, area); self.draw_detail(f, area); }
             _ => {}
         }
     }
@@ -435,7 +575,7 @@ impl App {
     /// among whichever are visible. A hidden column lets the other span full
     /// width. The EVENTS/s panel (toggle `5`) shares NETWORK's row, splitting it
     /// 50/50; if NETWORK is hidden it becomes its own row in the right column.
-    fn draw_main(&self, f: &mut Frame, area: Rect) {
+    fn draw_main(&mut self, f: &mut Frame, area: Rect) {
         let right: Vec<Pane> = [Pane::File, Pane::Commands, Pane::Network]
             .into_iter().filter(|p| self.is_visible(*p)).collect();
         let process_vis = self.is_visible(Pane::Process);
@@ -559,7 +699,7 @@ impl App {
         if h > 0 { format!("{h}:{m:02}:{s:02}") } else { format!("{m}:{s:02}") }
     }
 
-    fn draw_processes(&self, f: &mut Frame, area: Rect) {
+    fn draw_processes(&mut self, f: &mut Frame, area: Rect) {
         // Per-row layout: "PPPPP  <prefix><comm padded to fill>  EEEEEE"
         //                    5    2  variable      to flush      2  6
         const PID_W: usize = 5;
@@ -582,8 +722,6 @@ impl App {
 
         let rows = self.filtered_proc_rows();
         let items: Vec<ListItem> = rows.iter()
-            .skip(self.process_scroll)
-            .take(body.height as usize)
             .map(|(pid, prefix)| {
                 let p = &self.processes[pid];
                 let prefix_cols = prefix.chars().count();
@@ -594,18 +732,16 @@ impl App {
                     w_pid = PID_W, w_comm = comm_w, w_ev = EV_W,
                 ))
             }).collect();
-        f.render_widget(List::new(items), body);
+        render_rows(f, body, items, &mut self.list_state[pane_index(Pane::Process)]);
     }
 
-    fn draw_files(&self, f: &mut Frame, area: Rect) {
+    fn draw_files(&mut self, f: &mut Frame, area: Rect) {
         let body = self.framed_pane(f, area, "ACTIVITY", Pane::File,
             format!("    {:>5} {:<8} {}", "PID", "COMM", "PATH / CMD"));
         // Prefix is "X G PPPPP CCCCCCCC " = 1+1+1+1+5+1+8+1 = 19 cols
         const PREFIX_COLS: usize = 19;
         let path_cols = (body.width as usize).saturating_sub(PREFIX_COLS).max(1);
         let items: Vec<ListItem> = self.filtered_files().into_iter()
-            .skip(self.file_scroll)
-            .take(body.height as usize)
             .map(|r| {
                 let glyph = if r.sensitive { "⚠" } else { " " };
                 let suffix = if r.coalesced { " (burst)" } else { "" };
@@ -617,25 +753,23 @@ impl App {
                     Span::styled(format!("{}{}", truncate(&r.path.display().to_string(), path_cols), suffix), style),
                 ]))
             }).collect();
-        f.render_widget(List::new(items), body);
+        render_rows(f, body, items, &mut self.list_state[pane_index(Pane::File)]);
     }
 
-    fn draw_commands(&self, f: &mut Frame, area: Rect) {
+    fn draw_commands(&mut self, f: &mut Frame, area: Rect) {
         let body = self.framed_pane(f, area, "COMMANDS", Pane::Commands,
             format!("{:>5}  {}", "PID", "ARGV"));
         const PREFIX_COLS: usize = 7; // 5 pid + 2 sep
         let argv_cols = (body.width as usize).saturating_sub(PREFIX_COLS).max(1);
         let items: Vec<ListItem> = self.filtered_commands().into_iter()
-            .skip(self.commands_scroll)
-            .take(body.height as usize)
             .map(|c| ListItem::new(format!(
                 "{:>5}  {}", c.pid, truncate(&c.argv, argv_cols),
             )))
             .collect();
-        f.render_widget(List::new(items), body);
+        render_rows(f, body, items, &mut self.list_state[pane_index(Pane::Commands)]);
     }
 
-    fn draw_network(&self, f: &mut Frame, area: Rect) {
+    fn draw_network(&mut self, f: &mut Frame, area: Rect) {
         // Host column flexes with width so the CONNS count is never clipped —
         // matters because NETWORK gets narrow when the EVENTS/s panel shares its
         // row.
@@ -644,13 +778,11 @@ impl App {
         let body = self.framed_pane(f, area, "NETWORK", Pane::Network,
             format!("{:<host_w$}  {:>CONNS_W$}", "HOST", "CONNS"));
         let items: Vec<ListItem> = self.filtered_network().into_iter()
-            .skip(self.network_scroll)
-            .take(body.height as usize)
             .map(|n| ListItem::new(format!(
                 "{:<host_w$}  {:>CONNS_W$}", truncate(&n.host, host_w), n.conns,
             )))
             .collect();
-        f.render_widget(List::new(items), body);
+        render_rows(f, body, items, &mut self.list_state[pane_index(Pane::Network)]);
     }
 
     /// Render the rounded outer block + the column-header row for a focusable
@@ -712,8 +844,8 @@ impl App {
         let label_style = Style::default().fg(Color::Gray);
         let mut spans: Vec<Span> = Vec::new();
         for (k, label) in [
-            ("Tab", "cycle"), ("1-4", "panes"), ("5", "events"), ("p", "pause"),
-            ("/", "filter"), ("h", "help"), ("q", "quit"),
+            ("Tab", "cycle"), ("1-4", "panes"), ("5", "events"), ("↵", "detail"),
+            ("p", "pause"), ("/", "filter"), ("h", "help"), ("q", "quit"),
         ] {
             spans.push(Span::styled(format!(" {k} "), key_style));
             spans.push(Span::styled(format!(" {label}  "), label_style));
@@ -722,7 +854,7 @@ impl App {
     }
 
     fn draw_help(&self, f: &mut Frame, area: Rect) {
-        let rect = centered_fixed(58, 33, area);
+        let rect = centered_fixed(58, 34, area);
         let block = modal_block(" keybindings ");
         let inner = block.inner(rect);
         f.render_widget(Clear, rect);
@@ -734,9 +866,10 @@ impl App {
             help_group("Navigation"),
             help_kv("Tab / S-Tab", "cycle panes fwd / back"),
             help_kv("1 2 3 4 5", "show / hide panes & events"),
-            help_kv("j k  ↑ ↓", "scroll"),
-            help_kv("PgUp PgDn", "scroll by page"),
-            help_kv("g / G", "jump to top / bottom"),
+            help_kv("j k  ↑ ↓", "move selection"),
+            help_kv("PgUp PgDn", "move by page"),
+            help_kv("g / G", "follow latest / jump to oldest"),
+            help_kv("Enter", "open row detail (Esc closes)"),
             Line::raw(""),
             help_group("Display"),
             help_kv("p", "pause / resume"),
@@ -784,6 +917,45 @@ impl App {
         ]);
         f.render_widget(Paragraph::new(lines), inner);
     }
+
+    /// The row-detail modal: a label/value list of the frozen snapshot, framed
+    /// like help/quit (no logo — it's content-focused). Esc/Enter/q close it.
+    ///
+    /// Long values are wrapped by hand and continuation lines are indented to the
+    /// value column, so a wrapped path/argv stays under itself rather than
+    /// sliding back under the label.
+    fn draw_detail(&self, f: &mut Frame, area: Rect) {
+        let Some(dv) = &self.detail else { return };
+        const MODAL_W: u16 = 66;
+        const LABEL_W: usize = 13;
+        // Inner content width once borders (2) and padding (2 each side) are removed.
+        let value_w = (MODAL_W as usize).saturating_sub(2 + 4 + LABEL_W).max(8);
+
+        let mut lines: Vec<Line> = Vec::new();
+        for (k, v) in &dv.rows {
+            let wrapped = wrap_text(v, value_w);
+            for (i, chunk) in wrapped.iter().enumerate() {
+                let label = if i == 0 { format!("{k:<LABEL_W$}") } else { " ".repeat(LABEL_W) };
+                lines.push(Line::from(vec![
+                    Span::styled(label, Style::default().fg(Color::Gray)),
+                    Span::raw(chunk.clone()),
+                ]));
+            }
+        }
+        lines.push(Line::raw(""));
+        lines.push(Line::from(vec![
+            key_cap("Esc"), Span::styled(" close", Style::default().fg(Color::DarkGray)),
+        ]).alignment(Alignment::Center));
+
+        // Size to the wrapped line count, plus padding (2) and borders (2).
+        let h = lines.len() as u16 + 4;
+        let rect = centered_fixed(MODAL_W, h, area);
+        let block = modal_block(&dv.title);
+        let inner = block.inner(rect);
+        f.render_widget(Clear, rect);
+        f.render_widget(block, rect);
+        f.render_widget(Paragraph::new(lines), inner);
+    }
 }
 
 fn pane_index(p: Pane) -> usize {
@@ -822,6 +994,29 @@ fn framed_chrome(f: &mut Frame, area: Rect, title: Line, focused: bool, header: 
     f.render_widget(hdr, split[0]);
 
     split[1]
+}
+
+/// Render a pane's rows into `area` with the shared selection highlight. In
+/// follow mode (`selected == None`) the viewport is pinned to the top so the
+/// newest rows stay in view; in browse mode `ListState` scrolls to the
+/// highlighted row.
+fn render_rows(f: &mut Frame, area: Rect, items: Vec<ListItem>, state: &mut ListState) {
+    if state.selected().is_none() {
+        *state.offset_mut() = 0;
+    }
+    let list = List::new(items).highlight_style(
+        Style::default().bg(Color::Cyan).fg(Color::Black).add_modifier(Modifier::BOLD),
+    );
+    f.render_stateful_widget(list, area, state);
+}
+
+/// Full word for an ACTIVITY op glyph, for the detail modal.
+fn op_name(op: char) -> &'static str {
+    match op {
+        'R' => "read", 'W' => "write", 'C' => "create", 'X' => "close",
+        'D' => "delete", 'M' => "move", 'E' => "edit", 'A' => "multi-edit",
+        '$' => "bash", _ => "?",
+    }
 }
 
 /// Dim every cell in `area` so a modal reads as a focused overlay. Runs after
@@ -955,6 +1150,39 @@ fn build_tree_rows(processes: &HashMap<u32, ProcInfo>) -> Vec<(u32, String)> {
     rows
 }
 
+/// Wrap `s` to `width` columns, breaking on spaces where possible and
+/// hard-splitting any single token longer than `width` (e.g. a long path).
+/// Returns at least one line.
+fn wrap_text(s: &str, width: usize) -> Vec<String> {
+    if width == 0 { return vec![s.to_string()]; }
+    let mut lines: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let push_token = |lines: &mut Vec<String>, cur: &mut String, token: &str| {
+        // Hard-split a token that can't fit on its own line.
+        let mut rest = token;
+        while rest.chars().count() > width {
+            let head: String = rest.chars().take(width).collect();
+            if !cur.is_empty() { lines.push(std::mem::take(cur)); }
+            lines.push(head);
+            rest = &rest[rest.char_indices().nth(width).map(|(i, _)| i).unwrap_or(rest.len())..];
+        }
+        if cur.is_empty() {
+            cur.push_str(rest);
+        } else if cur.chars().count() + 1 + rest.chars().count() <= width {
+            cur.push(' ');
+            cur.push_str(rest);
+        } else {
+            lines.push(std::mem::take(cur));
+            cur.push_str(rest);
+        }
+    };
+    for token in s.split(' ') {
+        push_token(&mut lines, &mut cur, token);
+    }
+    if !cur.is_empty() || lines.is_empty() { lines.push(cur); }
+    lines
+}
+
 fn truncate(s: &str, n: usize) -> String {
     if s.len() <= n { s.to_string() } else {
         let mut t = s.chars().rev().take(n.saturating_sub(1)).collect::<String>();
@@ -1072,8 +1300,8 @@ mod tests {
         let mut app = test_app();
         app.focus = Pane::Commands;
         app.commands = vec![
-            CommandRow { pid: 1, argv: "rg foo".into() },
-            CommandRow { pid: 2, argv: "ls -la".into() },
+            CommandRow { pid: 1, argv: "rg foo".into(), ts_ns: 0 },
+            CommandRow { pid: 2, argv: "ls -la".into(), ts_ns: 0 },
         ];
         // Enter filter mode, type "rg", commit.
         app.handle_key(key('/'));
@@ -1141,6 +1369,84 @@ mod tests {
         app.ingest(ev);
         // The tree shows the clean basename, not the raw "/usr/bin/rg" path.
         assert_eq!(app.processes[&42].comm, "rg");
+    }
+
+    #[test]
+    fn wrap_text_breaks_on_spaces_and_hard_splits_long_tokens() {
+        assert_eq!(wrap_text("a b c", 10), vec!["a b c"]);
+        assert_eq!(wrap_text("hello world foo", 5), vec!["hello", "world", "foo"]);
+        // A long token with no spaces is hard-split.
+        assert_eq!(wrap_text("abcdefghij", 4), vec!["abcd", "efgh", "ij"]);
+        assert!(wrap_text("", 5) == vec![""]);
+    }
+
+    #[test]
+    fn down_enters_browse_and_up_off_top_returns_to_follow() {
+        let mut app = test_app();
+        app.focus = Pane::Commands;
+        app.commands = vec![
+            CommandRow { pid: 1, argv: "a".into(), ts_ns: 0 },
+            CommandRow { pid: 2, argv: "b".into(), ts_ns: 0 },
+            CommandRow { pid: 3, argv: "c".into(), ts_ns: 0 },
+        ];
+        assert_eq!(app.focus_selected(), None); // follow: no highlight
+        app.handle_key(code(KeyCode::Down));
+        assert_eq!(app.focus_selected(), Some(0));
+        app.handle_key(code(KeyCode::Down));
+        assert_eq!(app.focus_selected(), Some(1));
+        app.handle_key(code(KeyCode::Up));
+        assert_eq!(app.focus_selected(), Some(0));
+        app.handle_key(code(KeyCode::Up)); // off the top → back to follow
+        assert_eq!(app.focus_selected(), None);
+    }
+
+    #[test]
+    fn enter_opens_detail_and_esc_closes() {
+        let mut app = test_app();
+        app.focus = Pane::Commands;
+        app.commands = vec![CommandRow { pid: 7, argv: "rg foo".into(), ts_ns: 0 }];
+        app.handle_key(code(KeyCode::Enter));
+        assert_eq!(app.mode, Mode::Detail);
+        assert!(app.detail.is_some());
+        app.handle_key(code(KeyCode::Esc));
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(app.detail.is_none());
+    }
+
+    #[test]
+    fn enter_on_empty_pane_is_noop() {
+        let mut app = test_app();
+        app.focus = Pane::Commands; // no rows
+        app.handle_key(code(KeyCode::Enter));
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(app.detail.is_none());
+    }
+
+    #[test]
+    fn selection_sticks_to_row_as_new_events_arrive() {
+        use crate::event::{Event, EventData, EventKind, ProcessRef};
+        use std::sync::Arc;
+        let mut app = test_app();
+        app.focus = Pane::Commands;
+        app.commands = vec![
+            CommandRow { pid: 1, argv: "old1".into(), ts_ns: 0 },
+            CommandRow { pid: 2, argv: "old2".into(), ts_ns: 0 },
+        ];
+        app.handle_key(code(KeyCode::Down));
+        app.handle_key(code(KeyCode::Down)); // highlight "old2" at index 1
+        assert_eq!(app.focus_selected(), Some(1));
+        // A new command lands at the front; the highlight follows its logical row.
+        let ev = Event {
+            ts_ns: 5, kind: EventKind::Exec, pid: 9, ppid: 1,
+            process: Arc::new(ProcessRef {
+                pid: 9, comm: "new".into(), image: PathBuf::from("/bin/new"),
+                argv: vec!["/bin/new".into()],
+            }),
+            data: EventData::Exec { argv: vec!["/bin/new".into()], image: PathBuf::from("/bin/new") },
+            flags: 0,
+        };
+        app.ingest(ev);
+        assert_eq!(app.focus_selected(), Some(2));
     }
 
     #[test]
