@@ -68,7 +68,9 @@ ctrace fix-perms
 - **NETWORK** (`4`) — remote hosts and their connection counts
 - **EVENTS/s** (`5`) — a one-minute sparkline of the event rate, sitting beside NETWORK
 
-Keys: `Tab` / `Shift-Tab` move focus · `1`–`5` show/hide panels · `j`/`k` (or arrows) scroll · `g`/`G` jump to top/bottom · `f` or `/` filter the focused pane · `p` pause · `h` (or `?`) help · `q` / `Esc` quit · `Ctrl-C` quit immediately.
+By default each pane follows the latest events. Press `j`/`k` (or the arrows) to start browsing — a highlighted row appears — and `Enter` to open a detail view of that row (full path / argv / host, untruncated, plus when it happened). `Esc` closes the detail; `g` returns to following the latest.
+
+Keys: `Tab` / `Shift-Tab` move focus · `1`–`5` show/hide panels · `j`/`k` (or arrows) move selection · `g`/`G` follow latest / jump to oldest · `Enter` row detail · `f` or `/` filter the focused pane · `p` pause · `h` (or `?`) help · `q` / `Esc` quit · `Ctrl-C` quit immediately.
 
 ## How it works
 
