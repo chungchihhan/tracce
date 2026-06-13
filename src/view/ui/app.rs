@@ -1305,7 +1305,7 @@ fn modal_block(title: &str) -> Block<'static> {
 }
 
 /// The ctrace wordmark as centered, cyan-bold lines for modal headers.
-fn logo_lines() -> Vec<Line<'static>> {
+pub(crate) fn logo_lines() -> Vec<Line<'static>> {
     LOGO.iter()
         .map(|l| {
             Line::from(Span::styled(
@@ -1318,7 +1318,7 @@ fn logo_lines() -> Vec<Line<'static>> {
 }
 
 /// A footer-style key cap: black text on a cyan chip, matching the bottom bar.
-fn key_cap(k: &str) -> Span<'static> {
+pub(crate) fn key_cap(k: &str) -> Span<'static> {
     Span::styled(
         format!(" {k} "),
         Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD),
