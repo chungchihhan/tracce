@@ -4,14 +4,18 @@ use crossterm::event::{self, Event as CtEvent, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListState, Padding, Paragraph, Sparkline};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListState, Padding, Paragraph};
 use ratatui::Frame;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::time::Duration;
 
 const RATE_BUCKET_NS: u64 = 1_000_000_000;
-const RATE_HISTORY_LEN: usize = 60;
+/// Height of the full-width EVENTS/s chart band (border + bars + x-axis baseline
+/// + time labels).
+const EVENTS_BAND_H: u16 = 11;
+/// Vertical bar glyphs by eighths (0..=8) for the EVENTS/s bar graph.
+const BAR8: [char; 9] = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 
 /// ctrace wordmark, shown atop the help and quit modals. All rows are padded to
 /// the same width so centered alignment stays flush.
@@ -25,11 +29,17 @@ const LOGO: [&str; 6] = [
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Pane { Process, File, Commands, Network }
+pub enum Pane { Process, File, Commands, Network, Events }
 
-/// Panes in display + toggle order. Index here is the `1`..`4` key and the
-/// position in `App::visible` / `App::filters`.
-const PANE_ORDER: [Pane; 4] = [Pane::Process, Pane::File, Pane::Commands, Pane::Network];
+/// Panes in display + toggle order. Index here is the `1`..`5` key and the
+/// position in `App::visible` / `App::filters` / `App::list_state`. `Events` is
+/// the full-width EVENTS/s chart band; it's focusable but has no filter or rows
+/// (its `list_state` selection is reused as the scrub cursor).
+const PANE_ORDER: [Pane; 5] = [Pane::Process, Pane::File, Pane::Commands, Pane::Network, Pane::Events];
+
+/// Selectable seconds-per-bar levels for the EVENTS/s x-axis zoom (Up/Down step
+/// through these while the pane is focused). `1` = one bar per second.
+const ZOOM_LEVELS: [usize; 6] = [1, 2, 5, 10, 30, 60];
 
 /// Which interaction mode the UI is in. Only `Normal` runs navigation keys; the
 /// others are transient overlays/input modes that capture the keyboard.
@@ -46,24 +56,27 @@ struct DetailView {
 pub struct App {
     pub session: SessionEntry,
     pub events: Vec<Event>,
-    pub focus: Pane,
+    /// Currently focused pane, or `None` for the "follow-all" overview (no
+    /// highlight, every pane pinned to its latest). This is the default and one
+    /// slot in the Tab cycle.
+    pub focus: Option<Pane>,
     pub paused: bool,
     pub dropped: usize,
     pub quit: bool,
     pub mode: Mode,
     /// Per-pane visibility, indexed by `PANE_ORDER`. At least one is always true.
-    visible: [bool; 4],
-    /// Whether the EVENTS/s rate panel (beside NETWORK) is shown. Toggled by `5`.
-    /// Deliberately *not* a `Pane`: it never takes focus and can't be filtered.
-    show_events: bool,
+    /// `Events` (index 4) is the EVENTS/s band, toggled by `5`.
+    visible: [bool; 5],
     /// Committed per-pane substring filter (lowercased compare), "" = no filter.
-    filters: [String; 4],
+    /// `Events` has no filter (its slot stays empty).
+    filters: [String; 5],
     /// Live text being typed while in `Mode::Filter`, not yet committed.
     filter_draft: String,
     /// Per-pane list selection + viewport. `selected == None` means "follow the
     /// latest" (no highlight, pinned to the newest row); `Some(i)` is browse mode
-    /// with a highlighted row. Indexed parallel to `PANE_ORDER`.
-    list_state: [ListState; 4],
+    /// with a highlighted row. For `Events`, the selection is the scrub cursor's
+    /// age in displayed bars (0 = now). Indexed parallel to `PANE_ORDER`.
+    list_state: [ListState; 5],
     /// Frozen detail snapshot for `Mode::Detail`; `None` outside it.
     detail: Option<DetailView>,
 
@@ -80,6 +93,10 @@ pub struct App {
     bucket_anchor_ns: u64,
     first_event_ns: Option<u64>,
     last_event_ns: u64,
+    /// EVENTS/s x-axis zoom: seconds aggregated into each displayed bar (one of
+    /// `ZOOM_LEVELS`). Purely a view transform over `rate_series` — never
+    /// persisted, so it behaves identically on live and replayed sessions.
+    events_zoom: usize,
 }
 
 pub struct ProcInfo { pub pid: u32, pub comm: String, pub ppid: u32, pub event_count: usize, pub last_ts_ns: u64 }
@@ -92,14 +109,13 @@ impl App {
         Self {
             session,
             events: Vec::new(),
-            focus: Pane::Process,
+            focus: None,
             paused: false,
             dropped: 0,
             quit: false,
             mode: Mode::Normal,
-            visible: [true; 4],
-            show_events: true,
-            filters: [String::new(), String::new(), String::new(), String::new()],
+            visible: [true; 5],
+            filters: std::array::from_fn(|_| String::new()),
             filter_draft: String::new(),
             list_state: std::array::from_fn(|_| ListState::default()),
             detail: None,
@@ -108,11 +124,12 @@ impl App {
             commands: Vec::new(),
             network: HashMap::new(),
             sensitive_count: 0,
-            rate_history: VecDeque::with_capacity(RATE_HISTORY_LEN),
+            rate_history: VecDeque::new(),
             current_bucket: 0,
             bucket_anchor_ns: 0,
             first_event_ns: None,
             last_event_ns: 0,
+            events_zoom: 1,
         }
     }
 
@@ -154,8 +171,9 @@ impl App {
             KeyCode::Esc => { self.filter_draft.clear(); self.mode = Mode::Normal; }
             // Commit the draft as the focused pane's filter.
             KeyCode::Enter => {
-                let i = pane_index(self.focus);
-                self.filters[i] = std::mem::take(&mut self.filter_draft);
+                if let Some(p) = self.focus {
+                    self.filters[pane_index(p)] = std::mem::take(&mut self.filter_draft);
+                }
                 self.mode = Mode::Normal;
                 self.clamp_selection();
             }
@@ -170,32 +188,47 @@ impl App {
             (KeyCode::Char('q'), _) => self.mode = Mode::QuitConfirm,
             // Esc precedence: clear the focused pane's filter if set, else quit-confirm.
             (KeyCode::Esc, _) => {
-                let i = pane_index(self.focus);
-                if self.filters[i].is_empty() {
-                    self.mode = Mode::QuitConfirm;
-                } else {
-                    self.filters[i].clear();
-                    self.clamp_selection();
+                match self.focus {
+                    Some(p) if !self.filters[pane_index(p)].is_empty() => {
+                        self.filters[pane_index(p)].clear();
+                        self.clamp_selection();
+                    }
+                    _ => self.mode = Mode::QuitConfirm,
                 }
             }
             (KeyCode::Char('h'), _) | (KeyCode::Char('?'), _) | (KeyCode::F(1), _) => {
                 self.mode = Mode::Help;
             }
-            (KeyCode::Char('f'), _) | (KeyCode::Char('/'), _) => {
-                // Seed the draft with the existing filter so it can be edited.
-                self.filter_draft = self.filters[pane_index(self.focus)].clone();
-                self.mode = Mode::Filter;
+            // `/` opens filter on the focused row pane (Events isn't filterable).
+            (KeyCode::Char('/'), _) => {
+                if let Some(p) = self.focus {
+                    if p != Pane::Events {
+                        self.filter_draft = self.filters[pane_index(p)].clone();
+                        self.mode = Mode::Filter;
+                    }
+                }
             }
+            // `f` drops the focused pane's highlight back to follow-latest.
+            (KeyCode::Char('f'), _) => self.sel_follow(),
             (KeyCode::Tab, _) => self.cycle_focus(1),
             (KeyCode::BackTab, _) => self.cycle_focus(-1),
             (KeyCode::Char('1'), _) => self.toggle_visible(Pane::Process),
             (KeyCode::Char('2'), _) => self.toggle_visible(Pane::File),
             (KeyCode::Char('3'), _) => self.toggle_visible(Pane::Commands),
             (KeyCode::Char('4'), _) => self.toggle_visible(Pane::Network),
-            (KeyCode::Char('5'), _) => self.show_events = !self.show_events,
+            (KeyCode::Char('5'), _) => self.toggle_visible(Pane::Events),
             (KeyCode::Char('p'), _) => self.paused = !self.paused,
-            (KeyCode::Char('j'), _) | (KeyCode::Down, _)  => self.sel_move(1),
-            (KeyCode::Char('k'), _) | (KeyCode::Up, _)    => self.sel_move(-1),
+            // Selection moves in "age" units: +1 = older, -1 = newer. For the
+            // horizontal EVENTS/s chart Left/Right scrub the cursor (Left = older,
+            // Right = newer) while Up/Down zoom the time axis instead of scrubbing.
+            (KeyCode::Char('j'), _) | (KeyCode::Down, _) => {
+                if self.focus == Some(Pane::Events) { self.zoom_events(1); } else { self.sel_move(1); }
+            }
+            (KeyCode::Char('k'), _) | (KeyCode::Up, _) => {
+                if self.focus == Some(Pane::Events) { self.zoom_events(-1); } else { self.sel_move(-1); }
+            }
+            (KeyCode::Left, _)  => self.sel_move(if self.focus == Some(Pane::Events) { 1 } else { -1 }),
+            (KeyCode::Right, _) => self.sel_move(if self.focus == Some(Pane::Events) { -1 } else { 1 }),
             (KeyCode::PageDown, _)                        => self.sel_move(10),
             (KeyCode::PageUp, _)                          => self.sel_move(-10),
             (KeyCode::Char('g'), _) | (KeyCode::Home, _)  => self.sel_follow(),
@@ -208,49 +241,57 @@ impl App {
     fn is_visible(&self, p: Pane) -> bool { self.visible[pane_index(p)] }
 
     /// Toggle a pane's visibility. Hiding the last visible pane is a no-op;
-    /// hiding the focused pane moves focus to the next visible one.
+    /// hiding the focused pane drops focus to the follow-all state.
     fn toggle_visible(&mut self, p: Pane) {
         let i = pane_index(p);
         if self.visible[i] {
             if self.visible.iter().filter(|v| **v).count() <= 1 { return; }
             self.visible[i] = false;
-            if self.focus == p { self.cycle_focus(1); }
+            if self.focus == Some(p) { self.focus = None; }
         } else {
             self.visible[i] = true;
         }
     }
 
-    /// Move focus by `dir` among visible panes. If the current focus is hidden,
-    /// snap to the first visible pane instead.
+    /// Move focus by `dir` around the ring `None → <visible panes> → None`. The
+    /// `None` slot is the follow-all overview (no highlight anywhere).
     fn cycle_focus(&mut self, dir: i32) {
-        let vis: Vec<Pane> = PANE_ORDER.into_iter().filter(|p| self.is_visible(*p)).collect();
-        if vis.is_empty() { return; }
-        let cur = match vis.iter().position(|p| *p == self.focus) {
-            Some(c) => c,
-            None => { self.focus = vis[0]; return; }
-        };
-        let n = vis.len() as i32;
-        let next = (((cur as i32 + dir) % n) + n) % n;
-        self.focus = vis[next as usize];
+        let mut ring: Vec<Option<Pane>> = vec![None];
+        ring.extend(PANE_ORDER.into_iter().filter(|p| self.is_visible(*p)).map(Some));
+        let n = ring.len() as i32;
+        let cur = ring.iter().position(|f| *f == self.focus).unwrap_or(0) as i32;
+        let next = (((cur + dir) % n) + n) % n;
+        self.focus = ring[next as usize];
     }
 
     fn pane_filter(&self, p: Pane) -> &str { &self.filters[pane_index(p)] }
 
+    /// Number of selectable items in the focused pane (0 if no pane is focused).
+    /// For `Events` this is the number of displayed bars at the current zoom —
+    /// the range the scrub cursor can move over.
     fn focus_len(&self) -> usize {
         match self.focus {
-            Pane::Process => self.filtered_proc_rows().len(),
-            Pane::File => self.filtered_files().len(),
-            Pane::Commands => self.filtered_commands().len(),
-            Pane::Network => self.filtered_network().len(),
+            Some(Pane::Process) => self.filtered_proc_rows().len(),
+            Some(Pane::File) => self.filtered_files().len(),
+            Some(Pane::Commands) => self.filtered_commands().len(),
+            Some(Pane::Network) => self.filtered_network().len(),
+            Some(Pane::Events) => self.zoomed_len(),
+            None => 0,
         }
     }
 
-    fn focus_state(&mut self) -> &mut ListState {
-        &mut self.list_state[pane_index(self.focus)]
+    /// Step the EVENTS/s x-axis zoom through `ZOOM_LEVELS`. `step > 0` zooms out
+    /// (more seconds per bar), `step < 0` zooms in. The displayed-bar count
+    /// changes, so re-clamp the scrub cursor afterwards.
+    fn zoom_events(&mut self, step: i32) {
+        let cur = ZOOM_LEVELS.iter().position(|z| *z == self.events_zoom).unwrap_or(0) as i32;
+        let next = (cur + step).clamp(0, ZOOM_LEVELS.len() as i32 - 1) as usize;
+        self.events_zoom = ZOOM_LEVELS[next];
+        self.clamp_selection();
     }
 
     fn focus_selected(&self) -> Option<usize> {
-        self.list_state[pane_index(self.focus)].selected()
+        self.focus.and_then(|p| self.list_state[pane_index(p)].selected())
     }
 
     /// Move the focused pane's selection by `delta` rows. From follow mode
@@ -258,9 +299,10 @@ impl App {
     /// stays in follow mode. Moving up off the top row returns to follow mode
     /// (highlight off, pinned to newest).
     fn sel_move(&mut self, delta: i64) {
+        let Some(p) = self.focus else { return };
         let len = self.focus_len();
         if len == 0 { return; }
-        let st = self.focus_state();
+        let st = &mut self.list_state[pane_index(p)];
         let next = match st.selected() {
             None => if delta > 0 { Some(0) } else { None },
             Some(i) => {
@@ -274,27 +316,31 @@ impl App {
         st.select(next);
     }
 
-    /// `g` / Home: resume following the latest (drop the highlight).
+    /// `f` / `g` / Home: resume following the latest (drop the highlight/cursor).
     fn sel_follow(&mut self) {
-        self.focus_state().select(None);
+        if let Some(p) = self.focus {
+            self.list_state[pane_index(p)].select(None);
+        }
     }
 
     /// `G` / End: jump to and highlight the last (oldest) row.
     fn sel_end(&mut self) {
+        let Some(p) = self.focus else { return };
         let len = self.focus_len();
         if len > 0 {
-            self.focus_state().select(Some(len - 1));
+            self.list_state[pane_index(p)].select(Some(len - 1));
         }
     }
 
     /// Re-clamp the focused pane's selection after its row count shrinks (e.g. a
     /// filter was applied/cleared) so it never points past the end.
     fn clamp_selection(&mut self) {
+        let Some(p) = self.focus else { return };
         let len = self.focus_len();
-        let st = self.focus_state();
+        let st = &mut self.list_state[pane_index(p)];
         match st.selected() {
             Some(_) if len == 0 => st.select(None),
-            Some(i) if i >= len => st.select(Some(len - 1)),
+            Some(i) if i >= len => st.select(Some(len.saturating_sub(1))),
             _ => {}
         }
     }
@@ -312,10 +358,11 @@ impl App {
     }
 
     /// Open the detail modal for the focused pane's selected row (or the top row
-    /// when still following). No-op if the pane has no rows.
+    /// / now-bucket when still following). No-op if nothing is focused/available.
     fn open_detail(&mut self) {
+        let Some(p) = self.focus else { return };
         let idx = self.focus_selected().unwrap_or(0);
-        if let Some(dv) = self.build_detail(self.focus, idx) {
+        if let Some(dv) = self.build_detail(p, idx) {
             self.detail = Some(dv);
             self.mode = Mode::Detail;
         }
@@ -378,7 +425,69 @@ impl App {
                     ],
                 })
             }
+            Pane::Events => {
+                // `idx` is the cursor's age in displayed bars (0 = now); each bar
+                // spans `events_zoom` seconds.
+                let z = self.events_zoom.max(1);
+                let series = self.zoomed_series();
+                let pos = series.len().checked_sub(1 + idx)?;
+                let rate = *series.get(pos)?;
+                let newest = idx * z;            // seconds-ago of the bar's newest edge
+                // Approximate the bar's wall time: now, minus its newest edge.
+                let ts = self.last_event_ns.saturating_sub(newest as u64 * RATE_BUCKET_NS);
+                let age = if z == 1 {
+                    if idx == 0 { "now".into() } else { format!("{newest}s ago") }
+                } else {
+                    format!("{}–{}s ago", newest, newest + z - 1)
+                };
+                Some(DetailView {
+                    title: " Events/s detail ".into(),
+                    rows: vec![
+                        ("Rate".into(), format!("{rate} events/s")),
+                        ("Interval".into(), format!("{z}s/bar")),
+                        ("Age".into(), age),
+                        ("When".into(), self.rel_time(ts)),
+                        ("Recorded".into(), format!("{}s of history", self.rate_series_len())),
+                    ],
+                })
+            }
         }
+    }
+
+    /// The events-per-second series, oldest first, with the in-progress bucket
+    /// appended as the latest ("now") sample.
+    fn rate_series(&self) -> Vec<u64> {
+        self.rate_history.iter().copied().chain(std::iter::once(self.current_bucket)).collect()
+    }
+
+    /// `rate_series` aggregated into displayed bars of `events_zoom` seconds each
+    /// (rounded mean events/s, so the y-axis stays "/s"). Grouped from the newest
+    /// sample so the last bar always covers "now"; oldest bar first. With zoom 1
+    /// it equals `rate_series`.
+    fn zoomed_series(&self) -> Vec<u64> {
+        let z = self.events_zoom.max(1);
+        let series = self.rate_series();
+        if z == 1 { return series; }
+        let mut out = Vec::with_capacity(series.len().div_ceil(z));
+        let mut i = series.len();
+        while i > 0 {
+            let start = i.saturating_sub(z);
+            let chunk = &series[start..i];
+            let len = chunk.len() as u64;
+            out.push((chunk.iter().sum::<u64>() + len / 2) / len);
+            i = start;
+        }
+        out.reverse();
+        out
+    }
+
+    /// Number of displayed bars at the current zoom.
+    fn zoomed_len(&self) -> usize {
+        self.rate_series_len().div_ceil(self.events_zoom.max(1))
+    }
+
+    fn rate_series_len(&self) -> usize {
+        self.rate_history.len() + 1
     }
 
     /// Format an event timestamp as time-into-the-session, e.g. `+1:23`.
@@ -444,9 +553,10 @@ impl App {
             self.bucket_anchor_ns = ev.ts_ns;
         }
         self.last_event_ns = ev.ts_ns;
+        // Retain the full per-second history for the session so the EVENTS/s
+        // chart can scrub arbitrarily far back (one u64 per second is cheap).
         while ev.ts_ns >= self.bucket_anchor_ns.saturating_add(RATE_BUCKET_NS) {
             self.rate_history.push_back(self.current_bucket);
-            if self.rate_history.len() > RATE_HISTORY_LEN { self.rate_history.pop_front(); }
             self.current_bucket = 0;
             self.bucket_anchor_ns = self.bucket_anchor_ns.saturating_add(RATE_BUCKET_NS);
         }
@@ -550,17 +660,21 @@ impl App {
 
     pub fn draw(&mut self, f: &mut Frame) {
         let area = f.area();
+        let events_on = self.is_visible(Pane::Events);
+        let mut constraints = vec![Constraint::Length(1), Constraint::Min(3)];
+        if events_on { constraints.push(Constraint::Length(EVENTS_BAND_H)); }
+        constraints.push(Constraint::Length(1)); // footer
         let v = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(1),  // header (status line; rate moved to EVENTS/s panel)
-                Constraint::Min(3),     // main
-                Constraint::Length(1),  // footer
-            ])
+            .constraints(constraints)
             .split(area);
         self.draw_header(f, v[0]);
         self.draw_main(f, v[1]);
-        self.draw_footer(f, v[2]);
+        if events_on {
+            let focused = self.focus == Some(Pane::Events);
+            self.draw_events(f, v[2], focused);
+        }
+        self.draw_footer(f, v[v.len() - 1]);
 
         match self.mode {
             Mode::Help => { dim_backdrop(f, area); self.draw_help(f, area); }
@@ -570,20 +684,16 @@ impl App {
         }
     }
 
-    /// Lay out the visible panes. Process owns the left column; Activity /
-    /// Commands / Network stack in the right column, splitting height equally
-    /// among whichever are visible. A hidden column lets the other span full
-    /// width. The EVENTS/s panel (toggle `5`) shares NETWORK's row, splitting it
-    /// 50/50; if NETWORK is hidden it becomes its own row in the right column.
+    /// Lay out the row panes. Process owns the left column; Activity / Commands /
+    /// Network stack in the right column, splitting height equally among whichever
+    /// are visible. A hidden column lets the other span full width. (EVENTS/s is a
+    /// separate full-width band drawn by `draw`, not part of this grid.)
     fn draw_main(&mut self, f: &mut Frame, area: Rect) {
         let right: Vec<Pane> = [Pane::File, Pane::Commands, Pane::Network]
             .into_iter().filter(|p| self.is_visible(*p)).collect();
         let process_vis = self.is_visible(Pane::Process);
-        // EVENTS/s gets a dedicated row only when it can't ride NETWORK's row.
-        let events_own_row = self.show_events && !self.is_visible(Pane::Network);
-        let right_has_content = !right.is_empty() || events_own_row;
 
-        let (proc_area, right_area) = if process_vis && right_has_content {
+        let (proc_area, right_area) = if process_vis && !right.is_empty() {
             let h = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
@@ -599,9 +709,9 @@ impl App {
             self.draw_processes(f, a);
         }
         let Some(a) = right_area else { return };
+        if right.is_empty() { return; }
 
-        let n = right.len() as u32 + events_own_row as u32;
-        if n == 0 { return; }
+        let n = right.len() as u32;
         let constraints: Vec<Constraint> = (0..n).map(|_| Constraint::Ratio(1, n)).collect();
         let chunks = Layout::default()
             .direction(Direction::Vertical)
@@ -611,20 +721,9 @@ impl App {
             match pane {
                 Pane::File => self.draw_files(f, chunks[i]),
                 Pane::Commands => self.draw_commands(f, chunks[i]),
-                Pane::Network if self.show_events => {
-                    let split = Layout::default()
-                        .direction(Direction::Horizontal)
-                        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-                        .split(chunks[i]);
-                    self.draw_network(f, split[0]);
-                    self.draw_events(f, split[1]);
-                }
                 Pane::Network => self.draw_network(f, chunks[i]),
-                Pane::Process => {}
+                Pane::Process | Pane::Events => {}
             }
-        }
-        if events_own_row {
-            self.draw_events(f, chunks[right.len()]);
         }
     }
 
@@ -667,20 +766,174 @@ impl App {
         f.render_widget(Paragraph::new(status), area);
     }
 
-    /// The EVENTS/s panel: a one-minute sparkline under the live rate. Framed
-    /// exactly like the other panes (same border + title + header row), it just
-    /// never takes focus, so its title carries the unfocused gray styling and
-    /// the leading `5` doubles as its show/hide hotkey hint.
-    fn draw_events(&self, f: &mut Frame, area: Rect) {
-        let title = Line::from(Span::styled(" 5 EVENTS/s ", Style::default().fg(Color::Gray)));
-        let header = format!("{:>5}/s   last 60s", self.current_rate());
-        let body = framed_chrome(f, area, title, false, header);
+    /// The EVENTS/s band: a full-width vertical bar graph of events-per-second,
+    /// `events_zoom` seconds per bar. When focused, Left/Right scrub a cyan cursor
+    /// column (the title shows the value under it) and Up/Down zoom the time axis;
+    /// otherwise the title shows the live rate. The visible window is anchored to
+    /// "now" and pans left to keep the cursor in view.
+    fn draw_events(&self, f: &mut Frame, area: Rect, focused: bool) {
+        // borders().inner() without needing the title built first.
+        let inner = Rect {
+            x: area.x + 1,
+            y: area.y + 1,
+            width: area.width.saturating_sub(2),
+            height: area.height.saturating_sub(2),
+        };
+        if inner.width < 6 || inner.height < 2 { return; }
 
-        let data: Vec<u64> = self.rate_history.iter().copied().collect();
-        let spark = Sparkline::default()
-            .data(data)
-            .style(Style::default().fg(Color::Green));
-        f.render_widget(spark, body);
+        let z = self.events_zoom.max(1);
+        let series = self.zoomed_series();
+        let n = series.len();
+        let cursor_age = self.list_state[pane_index(Pane::Events)].selected();
+        // Cursor position in series coordinates (oldest = 0). None → pin to now.
+        let cursor_pos = cursor_age.map(|age| n.saturating_sub(1 + age));
+
+        // Layout: a 4-wide y-label gutter, then a 1-col y-axis, then the bars.
+        // The bottom two inner rows are the x-axis baseline and its time labels.
+        const GUTTER: u16 = 5;
+        if inner.height < 4 { return; }
+        let plot_rows = inner.height - 2;
+        let bars_x = inner.x + GUTTER;
+        let bars_w = inner.width.saturating_sub(GUTTER) as usize;
+
+        // Visible window of `bars_w` buckets, anchored right (now), panned left
+        // only far enough to keep the cursor visible.
+        let mut lo = n.saturating_sub(bars_w);
+        if let Some(cp) = cursor_pos {
+            if cp < lo { lo = cp; }
+        }
+        let win = &series[lo..n.min(lo + bars_w)];
+        let peak = win.iter().copied().max().unwrap_or(0).max(1);
+
+        // Title: live rate while following, or the value under the cursor; + peak.
+        let readout = match cursor_age {
+            Some(age) => {
+                let v = cursor_pos.and_then(|cp| series.get(cp)).copied().unwrap_or(0);
+                let when = if age == 0 { "now".to_string() } else { format!("{}s ago", age * z) };
+                format!("cursor {v}/s · {when} ")
+            }
+            None => format!("{}/s ", self.current_rate()),
+        };
+        let title = Line::from(vec![
+            Span::styled(
+                " 5 EVENTS/s ",
+                if focused { Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD) }
+                else { Style::default().fg(Color::Gray) },
+            ),
+            Span::styled(readout, Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::styled(format!("· {z}s/bar · peak {peak} "), Style::default().fg(Color::DarkGray)),
+        ]);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(if focused {
+                Style::default().fg(Color::Cyan)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            })
+            .title(title);
+        f.render_widget(block, area);
+
+        // Right-align the bars so the newest bar sits under "now"; until the
+        // history fills the window, the empty columns are on the left.
+        let draw_offset = bars_w.saturating_sub(win.len()) as u16;
+
+        // Coordinate frame: y-axis column at the gutter edge, x-axis baseline on
+        // the row below the bars, time labels on the last inner row.
+        let axis_x = bars_x - 1;
+        let baseline_y = inner.y + plot_rows;
+        let xlabel_y = baseline_y + 1;
+        let right_edge = inner.x + inner.width;
+        let newest_x = bars_x + draw_offset + win.len().saturating_sub(1) as u16;
+        let dim = Style::default().fg(Color::DarkGray);
+        let last = plot_rows.saturating_sub(1).max(1);
+
+        let buf = f.buffer_mut();
+
+        // Y-axis line + faint gridlines at the interior ticks, drawn BEFORE the
+        // bars so the bars paint over them.
+        for b in 0..plot_rows {
+            buf[(axis_x, inner.y + b)].set_symbol("│").set_style(dim);
+        }
+        // Four ticks from 0 (bottom) to peak (top), at integer rows.
+        let tick_rows: [(u16, u64); 4] = std::array::from_fn(|k| {
+            let k = k as u16;
+            let row_from_top = last - (k * last) / 3;
+            (row_from_top, peak * k as u64 / 3)
+        });
+        for &(row_from_top, _) in &tick_rows {
+            if row_from_top == 0 || row_from_top == last { continue; } // 0/peak need no gridline
+            let gy = inner.y + row_from_top;
+            for cx in bars_x..right_edge {
+                let cell = &mut buf[(cx, gy)];
+                if cell.symbol() == " " || cell.symbol().is_empty() {
+                    cell.set_symbol("┈").set_style(dim);
+                }
+            }
+        }
+
+        // Bars: each column spans `z` seconds; height ∝ rate, sub-cell via eighths.
+        for (ci, &v) in win.iter().enumerate() {
+            let x = bars_x + draw_offset + ci as u16;
+            if x >= right_edge { break; }
+            let is_cursor = Some(lo + ci) == cursor_pos;
+            let total_e = (v * plot_rows as u64 * 8 / peak) as i64;
+            for b in 0..plot_rows {
+                let cell_e = (total_e - b as i64 * 8).clamp(0, 8) as usize;
+                let y = inner.y + (plot_rows - 1 - b);
+                if is_cursor {
+                    // Solid cyan column so the cursor is visible at any height.
+                    buf[(x, y)]
+                        .set_symbol(&BAR8[cell_e].to_string())
+                        .set_style(Style::default().fg(Color::Black).bg(Color::Cyan));
+                } else if cell_e > 0 {
+                    buf[(x, y)]
+                        .set_symbol(&BAR8[cell_e].to_string())
+                        .set_style(Style::default().fg(Color::Green));
+                }
+            }
+        }
+
+        // Y-axis tick marks + value labels (right-aligned in the 4-col gutter).
+        for &(row_from_top, val) in &tick_rows {
+            let gy = inner.y + row_from_top;
+            buf[(axis_x, gy)].set_symbol("├").set_style(dim);
+            let label = format!("{val:>4}");
+            for (i, ch) in label.chars().enumerate() {
+                let lx = inner.x + i as u16;
+                if lx < axis_x {
+                    buf[(lx, gy)].set_symbol(&ch.to_string()).set_style(dim);
+                }
+            }
+        }
+
+        // X-axis baseline with the origin corner.
+        buf[(axis_x, baseline_y)].set_symbol("└").set_style(dim);
+        for cx in bars_x..right_edge {
+            buf[(cx, baseline_y)].set_symbol("─").set_style(dim);
+        }
+
+        // X-axis time ticks: up to 4, anchored at "now" and stepping left. Each is
+        // labeled with its age in seconds (bars-from-now × zoom), centered under
+        // the tick and clamped so labels neither overflow nor overlap.
+        let step = (newest_x.saturating_sub(bars_x) / 3).max(1);
+        let mut occupied_left = right_edge;
+        for k in 0..4u16 {
+            let tx = newest_x.saturating_sub(step * k);
+            if k > 0 && tx <= axis_x { break; }
+            buf[(tx, baseline_y)].set_symbol("┴").set_style(dim);
+            let age = (newest_x - tx) as usize * z;
+            let label = if age == 0 { "now".to_string() } else { format!("-{age}s") };
+            let len = label.chars().count() as u16;
+            let mut sx = tx.saturating_sub(len / 2).max(inner.x);
+            if sx + len > right_edge { sx = right_edge.saturating_sub(len); }
+            if sx + len <= occupied_left {
+                for (i, ch) in label.chars().enumerate() {
+                    buf[(sx + i as u16, xlabel_y)].set_symbol(&ch.to_string()).set_style(dim);
+                }
+                occupied_left = sx;
+            }
+        }
     }
 
     fn current_rate(&self) -> u64 {
@@ -788,13 +1041,13 @@ impl App {
     /// Render the rounded outer block + the column-header row for a focusable
     /// pane, returning the area below the header where the list should draw.
     fn framed_pane(&self, f: &mut Frame, area: Rect, name: &str, pane: Pane, header: String) -> Rect {
-        framed_chrome(f, area, self.title(name, pane), self.focus == pane, header)
+        framed_chrome(f, area, self.title(name, pane), self.focus == Some(pane), header)
     }
 
     /// Pane title: " <n> NAME " plus a " [filter] " suffix when one is active.
     /// The leading digit doubles as the show/hide hotkey hint.
     fn title(&self, name: &str, pane: Pane) -> Line<'_> {
-        let focused = self.focus == pane;
+        let focused = self.focus == Some(pane);
         let n = pane_index(pane) + 1;
         let filter = self.pane_filter(pane);
         let base = Style::default();
@@ -821,10 +1074,11 @@ impl App {
         // In filter mode the footer becomes the input line.
         if self.mode == Mode::Filter {
             let pane_name = match self.focus {
-                Pane::Process => "process",
-                Pane::File => "activity",
-                Pane::Commands => "commands",
-                Pane::Network => "network",
+                Some(Pane::Process) => "process",
+                Some(Pane::File) => "activity",
+                Some(Pane::Commands) => "commands",
+                Some(Pane::Network) => "network",
+                Some(Pane::Events) | None => "",
             };
             let line = Line::from(vec![
                 Span::styled(
@@ -844,8 +1098,8 @@ impl App {
         let label_style = Style::default().fg(Color::Gray);
         let mut spans: Vec<Span> = Vec::new();
         for (k, label) in [
-            ("Tab", "cycle"), ("1-4", "panes"), ("5", "events"), ("↵", "detail"),
-            ("p", "pause"), ("/", "filter"), ("h", "help"), ("q", "quit"),
+            ("Tab", "focus"), ("1-5", "show"), ("↵", "detail"), ("f", "follow"),
+            ("/", "filter"), ("p", "pause"), ("h", "help"), ("q", "quit"),
         ] {
             spans.push(Span::styled(format!(" {k} "), key_style));
             spans.push(Span::styled(format!(" {label}  "), label_style));
@@ -864,16 +1118,16 @@ impl App {
         lines.extend([
             Line::raw(""),
             help_group("Navigation"),
-            help_kv("Tab / S-Tab", "cycle panes fwd / back"),
+            help_kv("Tab / S-Tab", "cycle focus (incl. follow-all)"),
             help_kv("1 2 3 4 5", "show / hide panes & events"),
-            help_kv("j k  ↑ ↓", "move selection"),
-            help_kv("PgUp PgDn", "move by page"),
-            help_kv("g / G", "follow latest / jump to oldest"),
-            help_kv("Enter", "open row detail (Esc closes)"),
+            help_kv("←↓↑→  j k", "move selection (rows)"),
+            help_kv("← →  ·  ↑ ↓", "chart: scrub cursor · zoom time axis"),
+            help_kv("g / G  ·  f", "follow latest / oldest · follow"),
+            help_kv("Enter", "open detail (Esc closes)"),
             Line::raw(""),
             help_group("Display"),
             help_kv("p", "pause / resume"),
-            help_kv("f  /", "filter focused pane"),
+            help_kv("/", "filter focused pane"),
             Line::raw(""),
             help_group("Activity glyphs"),
             help_legend("R read  W write  C create  X close  D delete"),
@@ -964,6 +1218,7 @@ fn pane_index(p: Pane) -> usize {
         Pane::File => 1,
         Pane::Commands => 2,
         Pane::Network => 3,
+        Pane::Events => 4,
     }
 }
 
@@ -1260,45 +1515,67 @@ mod tests {
         app.toggle_visible(Pane::Process);
         app.toggle_visible(Pane::File);
         app.toggle_visible(Pane::Commands);
-        // Only Network left; hiding it must be refused.
         app.toggle_visible(Pane::Network);
-        assert!(app.is_visible(Pane::Network));
+        // Only Events left; hiding it must be refused.
+        app.toggle_visible(Pane::Events);
+        assert!(app.is_visible(Pane::Events));
         assert_eq!(app.visible.iter().filter(|v| **v).count(), 1);
     }
 
     #[test]
-    fn hiding_focused_pane_moves_focus() {
-        let mut app = test_app();
-        assert_eq!(app.focus, Pane::Process);
-        app.toggle_visible(Pane::Process);
-        assert!(!app.is_visible(Pane::Process));
-        assert_ne!(app.focus, Pane::Process);
-        assert!(app.is_visible(app.focus));
+    fn default_focus_is_follow_all() {
+        let app = test_app();
+        assert_eq!(app.focus, None);
     }
 
     #[test]
-    fn tab_skips_hidden_panes() {
+    fn hiding_focused_pane_drops_to_follow_all() {
+        let mut app = test_app();
+        app.focus = Some(Pane::Process);
+        app.toggle_visible(Pane::Process);
+        assert!(!app.is_visible(Pane::Process));
+        assert_eq!(app.focus, None);
+    }
+
+    #[test]
+    fn tab_cycles_through_empty_slot_and_skips_hidden() {
         let mut app = test_app();
         app.toggle_visible(Pane::File);     // hide pane 2
         app.toggle_visible(Pane::Commands); // hide pane 3
-        // Visible: Process, Network. Tab from Process -> Network.
+        app.toggle_visible(Pane::Events);   // hide pane 5
+        // Visible: Process, Network. Ring: (none) → Process → Network → (none).
+        assert_eq!(app.focus, None);
         app.handle_key(code(KeyCode::Tab));
-        assert_eq!(app.focus, Pane::Network);
+        assert_eq!(app.focus, Some(Pane::Process));
         app.handle_key(code(KeyCode::Tab));
-        assert_eq!(app.focus, Pane::Process);
+        assert_eq!(app.focus, Some(Pane::Network));
+        app.handle_key(code(KeyCode::Tab));
+        assert_eq!(app.focus, None); // back to follow-all
     }
 
     #[test]
-    fn back_tab_cycles_backwards() {
+    fn back_tab_from_empty_lands_on_last_pane() {
         let mut app = test_app();
+        // All panes visible; ring ends with Events.
         app.handle_key(code(KeyCode::BackTab));
-        assert_eq!(app.focus, Pane::Network);
+        assert_eq!(app.focus, Some(Pane::Events));
+    }
+
+    #[test]
+    fn f_returns_focused_pane_to_follow() {
+        let mut app = test_app();
+        app.focus = Some(Pane::Commands);
+        app.commands = vec![CommandRow { pid: 1, argv: "a".into(), ts_ns: 0 }];
+        app.handle_key(code(KeyCode::Down));
+        assert_eq!(app.focus_selected(), Some(0));
+        app.handle_key(key('f'));
+        assert_eq!(app.focus_selected(), None);
     }
 
     #[test]
     fn filter_commit_and_esc_clears() {
         let mut app = test_app();
-        app.focus = Pane::Commands;
+        app.focus = Some(Pane::Commands);
         app.commands = vec![
             CommandRow { pid: 1, argv: "rg foo".into(), ts_ns: 0 },
             CommandRow { pid: 2, argv: "ls -la".into(), ts_ns: 0 },
@@ -1326,22 +1603,67 @@ mod tests {
     }
 
     #[test]
-    fn key_5_toggles_events_panel() {
+    fn key_5_toggles_events_band() {
         let mut app = test_app();
-        assert!(app.show_events);
+        assert!(app.is_visible(Pane::Events));
         app.handle_key(key('5'));
-        assert!(!app.show_events);
+        assert!(!app.is_visible(Pane::Events));
         app.handle_key(key('5'));
-        assert!(app.show_events);
+        assert!(app.is_visible(Pane::Events));
     }
 
     #[test]
-    fn key_5_is_not_in_focus_cycle() {
-        // `5` must never move focus or be reachable via Tab — it's display-only.
+    fn events_chart_scrubs_and_opens_detail() {
         let mut app = test_app();
-        let before = app.focus;
-        app.handle_key(key('5'));
-        assert_eq!(app.focus, before);
+        app.first_event_ns = Some(0);
+        app.last_event_ns = 3_000_000_000;
+        app.rate_history.extend([1u64, 4, 2]); // + current_bucket => series len 4
+        app.focus = Some(Pane::Events);
+        assert_eq!(app.focus_selected(), None); // follow: pinned to now
+        app.handle_key(code(KeyCode::Left)); // scrub one step back
+        assert_eq!(app.focus_selected(), Some(0));
+        app.handle_key(code(KeyCode::Left));
+        assert_eq!(app.focus_selected(), Some(1));
+        // Enter builds a detail for the cursor's bucket.
+        app.handle_key(code(KeyCode::Enter));
+        assert_eq!(app.mode, Mode::Detail);
+        assert!(app.detail.is_some());
+    }
+
+    #[test]
+    fn events_up_down_zoom_the_time_axis() {
+        let mut app = test_app();
+        app.rate_history.extend([1u64, 4, 2]); // + current_bucket(0) => series [1,4,2,0]
+        app.focus = Some(Pane::Events);
+        assert_eq!(app.events_zoom, 1);
+
+        // Down zooms out through ZOOM_LEVELS; Up zooms back in. Up at level 1 is a
+        // no-op (clamped), never an accidental scrub.
+        app.handle_key(code(KeyCode::Up));
+        assert_eq!(app.events_zoom, 1);
+        app.handle_key(code(KeyCode::Down));
+        assert_eq!(app.events_zoom, 2);
+
+        // At 2s/bar the 4-second series collapses to two bars (rounded means,
+        // grouped from "now": [2,0]->1, [1,4]->3) and the cursor range halves.
+        assert_eq!(app.zoomed_series(), vec![3, 1]);
+        assert_eq!(app.zoomed_len(), 2);
+
+        app.handle_key(code(KeyCode::Up));
+        assert_eq!(app.events_zoom, 1);
+        assert_eq!(app.zoomed_series(), vec![1, 4, 2, 0]);
+    }
+
+    #[test]
+    fn zoom_out_reclamps_the_scrub_cursor() {
+        let mut app = test_app();
+        app.rate_history.extend([1u64, 4, 2]); // series len 4
+        app.focus = Some(Pane::Events);
+        app.handle_key(code(KeyCode::End)); // jump to oldest bar (idx 3 at 1s/bar)
+        assert_eq!(app.focus_selected(), Some(3));
+        app.handle_key(code(KeyCode::Down)); // 2s/bar => only 2 bars now
+        assert_eq!(app.events_zoom, 2);
+        assert_eq!(app.focus_selected(), Some(1)); // clamped into range
     }
 
     #[test]
@@ -1383,7 +1705,7 @@ mod tests {
     #[test]
     fn down_enters_browse_and_up_off_top_returns_to_follow() {
         let mut app = test_app();
-        app.focus = Pane::Commands;
+        app.focus = Some(Pane::Commands);
         app.commands = vec![
             CommandRow { pid: 1, argv: "a".into(), ts_ns: 0 },
             CommandRow { pid: 2, argv: "b".into(), ts_ns: 0 },
@@ -1403,7 +1725,7 @@ mod tests {
     #[test]
     fn enter_opens_detail_and_esc_closes() {
         let mut app = test_app();
-        app.focus = Pane::Commands;
+        app.focus = Some(Pane::Commands);
         app.commands = vec![CommandRow { pid: 7, argv: "rg foo".into(), ts_ns: 0 }];
         app.handle_key(code(KeyCode::Enter));
         assert_eq!(app.mode, Mode::Detail);
@@ -1416,7 +1738,7 @@ mod tests {
     #[test]
     fn enter_on_empty_pane_is_noop() {
         let mut app = test_app();
-        app.focus = Pane::Commands; // no rows
+        app.focus = Some(Pane::Commands); // no rows
         app.handle_key(code(KeyCode::Enter));
         assert_eq!(app.mode, Mode::Normal);
         assert!(app.detail.is_none());
@@ -1427,7 +1749,7 @@ mod tests {
         use crate::event::{Event, EventData, EventKind, ProcessRef};
         use std::sync::Arc;
         let mut app = test_app();
-        app.focus = Pane::Commands;
+        app.focus = Some(Pane::Commands);
         app.commands = vec![
             CommandRow { pid: 1, argv: "old1".into(), ts_ns: 0 },
             CommandRow { pid: 2, argv: "old2".into(), ts_ns: 0 },
@@ -1452,7 +1774,7 @@ mod tests {
     #[test]
     fn filter_esc_cancels_without_committing() {
         let mut app = test_app();
-        app.focus = Pane::Commands;
+        app.focus = Some(Pane::Commands);
         app.handle_key(key('/'));
         app.handle_key(key('x'));
         app.handle_key(code(KeyCode::Esc)); // cancel input

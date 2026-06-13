@@ -66,11 +66,11 @@ ctrace fix-perms
 - **ACTIVITY** (`2`) — recent file operations (`R` read · `W` write · `C` create · `X` close · `D` delete · `M` move · `E` edit · `A` multi-edit · `$` bash), with a `⚠` on sensitive paths and `(burst)` on coalesced bursts
 - **COMMANDS** (`3`) — exec'd command lines (full argv)
 - **NETWORK** (`4`) — remote hosts and their connection counts
-- **EVENTS/s** (`5`) — a one-minute sparkline of the event rate, sitting beside NETWORK
+- **EVENTS/s** (`5`) — a full-width bar graph (bottom) of the events-per-second rate, with a labeled Y-axis (0 → peak, with gridlines) and an X-axis time scale (`−Ns` … `now`)
 
-By default each pane follows the latest events. Press `j`/`k` (or the arrows) to start browsing — a highlighted row appears — and `Enter` to open a detail view of that row (full path / argv / host, untruncated, plus when it happened). `Esc` closes the detail; `g` returns to following the latest.
+By default nothing is focused and every pane follows the latest events. `Tab` cycles focus through the panes and back to that follow-all state. In a focused row pane, the arrows (or `j`/`k`) move a highlighted selection and `Enter` opens a detail view (full path / argv / host, untruncated, plus when it happened). On the focused EVENTS/s graph, **Left/Right scrub** a cyan cursor along time and **Up/Down zoom the time axis** (1 → 2 → 5 → 10 → 30 → 60 seconds per bar). `f` returns the pane to following the latest; `Esc` closes the detail.
 
-Keys: `Tab` / `Shift-Tab` move focus · `1`–`5` show/hide panels · `j`/`k` (or arrows) move selection · `g`/`G` follow latest / jump to oldest · `Enter` row detail · `f` or `/` filter the focused pane · `p` pause · `h` (or `?`) help · `q` / `Esc` quit · `Ctrl-C` quit immediately.
+Keys: `Tab` / `Shift-Tab` cycle focus (incl. follow-all) · `1`–`5` show/hide panels · arrows or `j`/`k` move selection · on the graph ←/→ scrub and ↑/↓ zoom the time axis · `f` follow latest · `g`/`G` follow / jump to oldest · `Enter` detail · `/` filter the focused pane · `p` pause · `h` (or `?`) help · `q` / `Esc` quit · `Ctrl-C` quit immediately.
 
 ## How it works
 
