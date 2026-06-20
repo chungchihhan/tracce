@@ -31,6 +31,33 @@ fn discover_empty_returns_empty() {
 }
 
 #[test]
+fn discover_reads_pre_rename_ctrace_version_key() {
+    // Sessions recorded before the ctrace→tracce rename store the version under
+    // "ctrace_version". The serde alias must keep them discoverable.
+    let root = TempDir::new().unwrap();
+    let d = root.path().join("sessions").join("2026-05-28T10-00-00_old_1");
+    std::fs::create_dir_all(&d).unwrap();
+    std::fs::write(d.join("status"), "done\n").unwrap();
+    std::fs::write(d.join("events.jsonl"), "").unwrap();
+    std::fs::write(d.join("meta.json"), r#"{
+        "session_id": "2026-05-28T10-00-00_old_1",
+        "started_at": "2026-05-28T10:00:00Z",
+        "ended_at": null,
+        "cwd": "/tmp/old",
+        "argv": ["claude"],
+        "claude_pid": 1,
+        "tracer_pid": 1,
+        "hostname": "h",
+        "macos_version": "15.4",
+        "ctrace_version": "0.1.0"
+    }"#).unwrap();
+
+    let entries = discover(root.path()).unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].meta.tracce_version, "0.1.0");
+}
+
+#[test]
 fn discover_orders_live_first_then_recent() {
     let root = TempDir::new().unwrap();
     touch_session(root.path(), "2026-05-28T10-00-00_a_1", "done", "2026-05-28T10:00:00Z");
