@@ -829,7 +829,7 @@ impl App {
             .border_style(if focused {
                 Style::default().fg(Color::Cyan)
             } else {
-                Style::default().fg(Color::DarkGray)
+                Style::default().fg(Color::White)
             })
             .title(title);
         f.render_widget(block, area);
@@ -846,6 +846,10 @@ impl App {
         let right_edge = inner.x + inner.width;
         let newest_x = bars_x + draw_offset + win.len().saturating_sub(1) as u16;
         let dim = Style::default().fg(Color::DarkGray);
+        // Structural axis lines (y-axis, baseline, ticks) read as white so the
+        // chart frame is clearly visible; the interior gridlines and the numeric
+        // labels stay dim/faint.
+        let axis = Style::default().fg(Color::White);
         let last = plot_rows.saturating_sub(1).max(1);
 
         let buf = f.buffer_mut();
@@ -853,7 +857,7 @@ impl App {
         // Y-axis line + faint gridlines at the interior ticks, drawn BEFORE the
         // bars so the bars paint over them.
         for b in 0..plot_rows {
-            buf[(axis_x, inner.y + b)].set_symbol("│").set_style(dim);
+            buf[(axis_x, inner.y + b)].set_symbol("│").set_style(axis);
         }
         // Four ticks from 0 (bottom) to peak (top), at integer rows.
         let tick_rows: [(u16, u64); 4] = std::array::from_fn(|k| {
@@ -897,7 +901,7 @@ impl App {
         // Y-axis tick marks + value labels (right-aligned in the 4-col gutter).
         for &(row_from_top, val) in &tick_rows {
             let gy = inner.y + row_from_top;
-            buf[(axis_x, gy)].set_symbol("├").set_style(dim);
+            buf[(axis_x, gy)].set_symbol("├").set_style(axis);
             let label = format!("{val:>4}");
             for (i, ch) in label.chars().enumerate() {
                 let lx = inner.x + i as u16;
@@ -908,9 +912,9 @@ impl App {
         }
 
         // X-axis baseline with the origin corner.
-        buf[(axis_x, baseline_y)].set_symbol("└").set_style(dim);
+        buf[(axis_x, baseline_y)].set_symbol("└").set_style(axis);
         for cx in bars_x..right_edge {
-            buf[(cx, baseline_y)].set_symbol("─").set_style(dim);
+            buf[(cx, baseline_y)].set_symbol("─").set_style(axis);
         }
 
         // X-axis time ticks: up to 4, anchored at "now" and stepping left. Each is
@@ -921,7 +925,7 @@ impl App {
         for k in 0..4u16 {
             let tx = newest_x.saturating_sub(step * k);
             if k > 0 && tx <= axis_x { break; }
-            buf[(tx, baseline_y)].set_symbol("┴").set_style(dim);
+            buf[(tx, baseline_y)].set_symbol("┴").set_style(axis);
             let age = (newest_x - tx) as usize * z;
             let label = if age == 0 { "now".to_string() } else { format!("-{age}s") };
             let len = label.chars().count() as u16;
@@ -985,7 +989,8 @@ impl App {
                     w_pid = PID_W, w_comm = comm_w, w_ev = EV_W,
                 ))
             }).collect();
-        render_rows(f, body, items, &mut self.list_state[pane_index(Pane::Process)]);
+        let focused = self.focus == Some(Pane::Process);
+        render_rows(f, body, items, &mut self.list_state[pane_index(Pane::Process)], focused);
     }
 
     fn draw_files(&mut self, f: &mut Frame, area: Rect) {
@@ -1006,7 +1011,8 @@ impl App {
                     Span::styled(format!("{}{}", truncate(&r.path.display().to_string(), path_cols), suffix), style),
                 ]))
             }).collect();
-        render_rows(f, body, items, &mut self.list_state[pane_index(Pane::File)]);
+        let focused = self.focus == Some(Pane::File);
+        render_rows(f, body, items, &mut self.list_state[pane_index(Pane::File)], focused);
     }
 
     fn draw_commands(&mut self, f: &mut Frame, area: Rect) {
@@ -1019,7 +1025,8 @@ impl App {
                 "{:>5}  {}", c.pid, truncate(&c.argv, argv_cols),
             )))
             .collect();
-        render_rows(f, body, items, &mut self.list_state[pane_index(Pane::Commands)]);
+        let focused = self.focus == Some(Pane::Commands);
+        render_rows(f, body, items, &mut self.list_state[pane_index(Pane::Commands)], focused);
     }
 
     fn draw_network(&mut self, f: &mut Frame, area: Rect) {
@@ -1035,7 +1042,8 @@ impl App {
                 "{:<host_w$}  {:>CONNS_W$}", truncate(&n.host, host_w), n.conns,
             )))
             .collect();
-        render_rows(f, body, items, &mut self.list_state[pane_index(Pane::Network)]);
+        let focused = self.focus == Some(Pane::Network);
+        render_rows(f, body, items, &mut self.list_state[pane_index(Pane::Network)], focused);
     }
 
     /// Render the rounded outer block + the column-header row for a focusable
@@ -1255,13 +1263,19 @@ fn framed_chrome(f: &mut Frame, area: Rect, title: Line, focused: bool, header: 
 /// follow mode (`selected == None`) the viewport is pinned to the top so the
 /// newest rows stay in view; in browse mode `ListState` scrolls to the
 /// highlighted row.
-fn render_rows(f: &mut Frame, area: Rect, items: Vec<ListItem>, state: &mut ListState) {
+fn render_rows(f: &mut Frame, area: Rect, items: Vec<ListItem>, state: &mut ListState, focused: bool) {
     if state.selected().is_none() {
         *state.offset_mut() = 0;
     }
-    let list = List::new(items).highlight_style(
-        Style::default().bg(Color::Cyan).fg(Color::Black).add_modifier(Modifier::BOLD),
-    );
+    // The focused pane gets the bright cyan selection bar; a pane that retains a
+    // selection after focus moves away gets a muted grey bar instead, so it's
+    // clear which pane an Enter would act on.
+    let highlight = if focused {
+        Style::default().bg(Color::Cyan).fg(Color::Black).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().bg(Color::DarkGray)
+    };
+    let list = List::new(items).highlight_style(highlight);
     f.render_stateful_widget(list, area, state);
 }
 
@@ -1282,9 +1296,25 @@ fn dim_backdrop(f: &mut Frame, area: Rect) {
     // Only add DIM — keep each cell's own colors so the dashboard just darkens
     // rather than turning a flat near-black.
     let dim = Style::default().add_modifier(Modifier::DIM);
+    // Reversed cells (the pane column-header bars) are the exception: layering
+    // DIM on faint+reverse+default-colors renders as a solid black bar on most
+    // terminals. Resolve those to a concrete dim-gray bar so they read as
+    // "dimmed" like everything else instead of blacking out.
+    let dim_reversed = Style::default()
+        .fg(Color::Black)
+        .bg(Color::DarkGray)
+        .remove_modifier(Modifier::REVERSED);
     for y in area.top()..area.bottom() {
         for x in area.left()..area.right() {
-            buf[(x, y)].set_style(dim);
+            let cell = &mut buf[(x, y)];
+            if cell.modifier.contains(Modifier::REVERSED) {
+                cell.set_style(dim_reversed);
+            } else if cell.fg == Color::DarkGray {
+                // Already the dim color (e.g. unfocused pane borders). Layering
+                // DIM on top crushes it to near-black, so leave it as-is.
+            } else {
+                cell.set_style(dim);
+            }
         }
     }
 }
