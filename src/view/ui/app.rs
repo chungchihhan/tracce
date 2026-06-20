@@ -821,7 +821,7 @@ impl App {
                 else { Style::default().fg(Color::Gray) },
             ),
             Span::styled(readout, Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-            Span::styled(format!("· {z}s/bar · peak {peak} "), Style::default().fg(Color::DarkGray)),
+            Span::styled(format!("· {z}s/bar · peak {peak} "), Style::default().fg(Color::White)),
         ]);
         let block = Block::default()
             .borders(Borders::ALL)
@@ -829,7 +829,7 @@ impl App {
             .border_style(if focused {
                 Style::default().fg(Color::Cyan)
             } else {
-                Style::default().fg(Color::White)
+                Style::default().fg(Color::DarkGray)
             })
             .title(title);
         f.render_widget(block, area);
@@ -906,7 +906,7 @@ impl App {
             for (i, ch) in label.chars().enumerate() {
                 let lx = inner.x + i as u16;
                 if lx < axis_x {
-                    buf[(lx, gy)].set_symbol(&ch.to_string()).set_style(dim);
+                    buf[(lx, gy)].set_symbol(&ch.to_string()).set_style(axis);
                 }
             }
         }
@@ -933,7 +933,7 @@ impl App {
             if sx + len > right_edge { sx = right_edge.saturating_sub(len); }
             if sx + len <= occupied_left {
                 for (i, ch) in label.chars().enumerate() {
-                    buf[(sx + i as u16, xlabel_y)].set_symbol(&ch.to_string()).set_style(dim);
+                    buf[(sx + i as u16, xlabel_y)].set_symbol(&ch.to_string()).set_style(axis);
                 }
                 occupied_left = sx;
             }
