@@ -11,8 +11,26 @@ claude that's already running and watch it live in a second terminal.
 
 ## Install
 
+### Homebrew (recommended)
+
 ```
-git clone <this repo>
+brew install chungchihhan/tap/ctrace
+```
+
+Builds from source via the tap, so it works on Apple Silicon and Intel with no
+code-signing prompts. Homebrew pulls in the Rust toolchain automatically; you
+just need the Xcode Command Line Tools. Upgrade with `brew upgrade ctrace`.
+
+### With cargo (needs Rust)
+
+```
+cargo install --git https://github.com/chungchihhan/ctrace
+```
+
+### From source
+
+```
+git clone https://github.com/chungchihhan/ctrace
 cd ctrace
 cargo build --release
 sudo cp target/release/ctrace /usr/local/bin/
