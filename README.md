@@ -1,46 +1,96 @@
-# ctrace
+<div align="center">
 
-macOS-only kernel-event tracer for Claude Code sessions. Either launch claude
-under ctrace and replay the recording later, or `ctrace attach` onto a
-claude that's already running and watch it live in a second terminal.
+<pre>
+ ██████╗████████╗██████╗  █████╗  ██████╗███████╗
+██╔════╝╚══██╔══╝██╔══██╗██╔══██╗██╔════╝██╔════╝
+██║        ██║   ██████╔╝███████║██║     █████╗
+██║        ██║   ██╔══██╗██╔══██║██║     ██╔══╝
+╚██████╗   ██║   ██║  ██║██║  ██║╚██████╗███████╗
+ ╚═════╝   ╚═╝   ╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝╚══════╝
+</pre>
 
-> Personal/audit tool — requires Full Disk Access for your terminal app.
-> ctrace itself runs as you; it uses `sudo` only to launch `eslogger`.
-> eslogger is the default event source — ctrace prompts for sudo on start and
-> degrades to poll-only (no file events) if you decline.
+### See exactly what Claude Code does on your machine
+
+A macOS kernel-event tracer for Claude Code sessions — every process, file, and
+network connection, live in your terminal or replayed later.
+
+![platform](https://img.shields.io/badge/platform-macOS%2013%2B-000000?logo=apple&logoColor=white)
+![built with Rust](https://img.shields.io/badge/built%20with-Rust-CE412B?logo=rust&logoColor=white)
+![install](https://img.shields.io/badge/install-Homebrew-FBB040?logo=homebrew&logoColor=white)
+![license](https://img.shields.io/badge/license-MIT-blue)
+![release](https://img.shields.io/github/v/release/chungchihhan/ctrace?color=success&label=release)
+
+</div>
+
+<!-- Tip: drop a terminal recording here once you have one, e.g. ![demo](docs/demo.gif) -->
+
+---
+
+## Why ctrace
+
+- 🌳 **Live process tree** — every descendant of the traced process, with per-process event counts
+- 📂 **File activity** — opens, writes, creates, deletes, renames — with a ⚠ on sensitive paths (`.env`, `~/.ssh`, `*.pem`, …)
+- 🧠 **Claude's intent, too** — reads Edit / Write / Read tool calls and the exact Bash command from the session transcript, shown next to kernel truth
+- 🌐 **Network** — remote hosts and their connection counts
+- 📈 **Events/s** — a live bar graph with a real time axis you can scrub and zoom
+- ⏺️ **Record & replay** — every session is written to JSONL, so you can `ctrace view` it later
+- 🔒 **Minimal privilege** — only Apple's signed `eslogger` runs as root, with a hardcoded argument list; ctrace itself never does
+
+> [!NOTE]
+> Personal/audit tool, macOS only. Your terminal app needs **Full Disk Access**.
+> ctrace runs as you and uses `sudo` only to launch `eslogger` (the default event
+> source). Decline the prompt and it degrades to poll-only — no file events.
+
+## Quick start
+
+```sh
+brew install chungchihhan/tap/ctrace
+
+# Terminal A — run Claude Code as usual
+claude
+
+# Terminal B — attach and watch it live
+ctrace attach
+```
 
 ## Install
 
-### Homebrew (recommended)
+<details open>
+<summary><b>Homebrew</b> (recommended)</summary>
 
-```
+```sh
 brew install chungchihhan/tap/ctrace
 ```
 
 Builds from source via the tap, so it works on Apple Silicon and Intel with no
 code-signing prompts. Homebrew pulls in the Rust toolchain automatically; you
 just need the Xcode Command Line Tools. Upgrade with `brew upgrade ctrace`.
+</details>
 
-### With cargo (needs Rust)
+<details>
+<summary><b>cargo</b> (needs Rust)</summary>
 
-```
+```sh
 cargo install --git https://github.com/chungchihhan/ctrace
 ```
+</details>
 
-### From source
+<details>
+<summary><b>From source</b></summary>
 
-```
+```sh
 git clone https://github.com/chungchihhan/ctrace
 cd ctrace
 cargo build --release
 sudo cp target/release/ctrace /usr/local/bin/
 ```
+</details>
 
 ## Usage
 
-### Watch a running claude, live (recommended)
+**Watch a running claude, live** (recommended — the only mode with a live dashboard):
 
-```
+```sh
 # Terminal A — start claude however you normally do
 claude
 
@@ -51,44 +101,57 @@ ctrace attach
 ctrace attach <pid>
 ```
 
-`attach` records to disk *and* draws the live TUI, since claude is in its own
-terminal. It's the only mode that shows a live dashboard.
+`attach` records to disk **and** draws the live TUI, since claude is in its own terminal.
 
-### Launch + record (replay later)
+**Launch + record, replay later** (claude owns the terminal, so no TUI is drawn):
 
-```
-# claude owns this terminal, so no TUI is drawn — the run is recorded to disk.
-ctrace                              # trace `claude` with no extra args
+```sh
+ctrace                                 # trace `claude` with no extra args
 ctrace claude --print "explain this repo"
+ctrace exec -- npm test                # testing hatch: trace any command
 
-ctrace exec -- npm test             # testing hatch: trace any command
-
-# Replay a recorded session in the TUI:
-ctrace view                         # picker
+ctrace view                            # replay in the TUI (picker)
 ctrace view --latest
 ctrace view <session-id-prefix>
-ctrace list
+ctrace list                            # sessions as a text table
 ```
 
-If a trace crashes and leaves files in an odd state, run:
-
-```
-ctrace fix-perms
-```
+If a trace crashes and leaves files in an odd state, run `ctrace fix-perms`.
 
 ## The dashboard
 
 `attach` and `view` render a live grid of panels:
 
-- **PROCESS TREE** (`1`) — the descendant process tree by pid, with each command name and its event count
-- **ACTIVITY** (`2`) — recent file operations (`R` read · `W` write · `C` create · `X` close · `D` delete · `M` move · `E` edit · `A` multi-edit · `$` bash), with a `⚠` on sensitive paths and `(burst)` on coalesced bursts
-- **COMMANDS** (`3`) — exec'd command lines (full argv)
-- **NETWORK** (`4`) — remote hosts and their connection counts
-- **EVENTS/s** (`5`) — a full-width bar graph (bottom) of the events-per-second rate, with a labeled Y-axis (0 → peak, with gridlines) and an X-axis time scale (`−Ns` … `now`)
+| Pane | Key | Shows |
+|---|:---:|---|
+| **PROCESS TREE** | `1` | the descendant process tree by pid, with each command name and its event count |
+| **ACTIVITY** | `2` | recent file ops (`R` read · `W` write · `C` create · `X` close · `D` delete · `M` move · `E` edit · `A` multi-edit · `$` bash), `⚠` sensitive · `(burst)` coalesced |
+| **COMMANDS** | `3` | exec'd command lines (full argv) |
+| **NETWORK** | `4` | remote hosts and connection counts |
+| **EVENTS/s** | `5` | full-width bar graph of the events-per-second rate, with a labeled Y-axis (0 → peak) and an X-axis time scale (`−Ns` … `now`) |
 
-By default nothing is focused and every pane follows the latest events. `Tab` cycles focus through the panes and back to that follow-all state. In a focused row pane, the arrows (or `j`/`k`) move a highlighted selection and `Enter` opens a detail view (full path / argv / host, untruncated, plus when it happened). On the focused EVENTS/s graph, **Left/Right scrub** a cyan cursor along time and **Up/Down zoom the time axis** (1 → 2 → 5 → 10 → 30 → 60 seconds per bar). `f` returns the pane to following the latest; `Esc` closes the detail.
+By default nothing is focused and every pane follows the latest events. `Tab` cycles
+focus through the panes and back to that follow-all state. In a focused row pane, the
+arrows (or `j`/`k`) move a highlighted selection and `Enter` opens a detail view (full
+path / argv / host, untruncated, plus when it happened). On the focused EVENTS/s graph,
+**Left/Right scrub** a cyan cursor along time and **Up/Down zoom the time axis**
+(1 → 2 → 5 → 10 → 30 → 60 seconds per bar).
 
-Keys: `Tab` / `Shift-Tab` cycle focus (incl. follow-all) · `1`–`5` show/hide panels · arrows or `j`/`k` move selection · on the graph ←/→ scrub and ↑/↓ zoom the time axis · `f` follow latest · `g`/`G` follow / jump to oldest · `Enter` detail · `/` filter the focused pane · `p` pause · `h` (or `?`) help · `q` / `Esc` quit · `Ctrl-C` quit immediately.
+### Keys
+
+| Key | Action |
+|---|---|
+| `Tab` / `Shift-Tab` | cycle focus (incl. follow-all) |
+| `1`–`5` | show / hide panels |
+| `↑` `↓` or `j` `k` | move selection |
+| `←` `→` *(graph)* | scrub the time cursor |
+| `↑` `↓` *(graph)* | zoom the time axis |
+| `Enter` | open row detail |
+| `/` | filter the focused pane |
+| `f` / `g` / `G` | follow latest / jump top / oldest |
+| `p` | pause |
+| `h` or `?` | help |
+| `q` / `Esc` | quit  ·  `Ctrl-C` quits immediately |
 
 ## How it works
 
@@ -144,3 +207,7 @@ exactly what that privilege buys and where it stops:
 - Very short-lived connections (< 500 ms) may be missed
 - `attach` captures from the attach moment forward — it can't replay what claude did before you attached
 - Not a sandbox — ctrace only observes
+
+## License
+
+[MIT](LICENSE) © Chih-han Chung
