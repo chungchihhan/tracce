@@ -1,13 +1,13 @@
-<div align="center">
-
-<pre>
+```text
  ██████╗████████╗██████╗  █████╗  ██████╗███████╗
 ██╔════╝╚══██╔══╝██╔══██╗██╔══██╗██╔════╝██╔════╝
 ██║        ██║   ██████╔╝███████║██║     █████╗
 ██║        ██║   ██╔══██╗██╔══██║██║     ██╔══╝
 ╚██████╗   ██║   ██║  ██║██║  ██║╚██████╗███████╗
  ╚═════╝   ╚═╝   ╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝╚══════╝
-</pre>
+```
+
+<div align="center">
 
 ### See exactly what Claude Code does on your machine
 
@@ -28,13 +28,13 @@ network connection, live in your terminal or replayed later.
 
 ## Why ctrace
 
-- 🌳 **Live process tree** — every descendant of the traced process, with per-process event counts
-- 📂 **File activity** — opens, writes, creates, deletes, renames — with a ⚠ on sensitive paths (`.env`, `~/.ssh`, `*.pem`, …)
-- 🧠 **Claude's intent, too** — reads Edit / Write / Read tool calls and the exact Bash command from the session transcript, shown next to kernel truth
-- 🌐 **Network** — remote hosts and their connection counts
-- 📈 **Events/s** — a live bar graph with a real time axis you can scrub and zoom
-- ⏺️ **Record & replay** — every session is written to JSONL, so you can `ctrace view` it later
-- 🔒 **Minimal privilege** — only Apple's signed `eslogger` runs as root, with a hardcoded argument list; ctrace itself never does
+- **Live process tree** — every descendant of the traced process, with per-process event counts
+- **File activity** — opens, writes, creates, deletes, renames — with a `⚠` on sensitive paths (`.env`, `~/.ssh`, `*.pem`, …)
+- **Claude's intent, too** — reads Edit / Write / Read tool calls and the exact Bash command from the session transcript, shown next to kernel truth
+- **Network** — remote hosts and their connection counts
+- **Events/s** — a live bar graph with a real time axis you can scrub and zoom
+- **Record & replay** — every session is written to JSONL, so you can `ctrace view` it later
+- **Minimal privilege** — only Apple's signed `eslogger` runs as root, with a hardcoded argument list; ctrace itself never does
 
 > [!NOTE]
 > Personal/audit tool, macOS only. Your terminal app needs **Full Disk Access**.
@@ -46,11 +46,11 @@ network connection, live in your terminal or replayed later.
 ```sh
 brew install chungchihhan/tap/ctrace
 
-# Terminal A — run Claude Code as usual
-claude
+# Terminal A — start a Claude Code session, traced
+ctrace claude
 
-# Terminal B — attach and watch it live
-ctrace attach
+# Terminal B — watch it live (and replay anytime later)
+ctrace view
 ```
 
 ## Install
@@ -88,32 +88,37 @@ sudo cp target/release/ctrace /usr/local/bin/
 
 ## Usage
 
-**Watch a running claude, live** (recommended — the only mode with a live dashboard):
+The dashboard always runs in a second terminal — Claude Code is itself a TUI and
+can't share one. There are two ways to get there.
+
+**Launch claude under ctrace, watch with `view`** (recommended):
 
 ```sh
-# Terminal A — start claude however you normally do
-claude
+# Terminal A — start a traced Claude Code session (claude owns this terminal)
+ctrace claude
+ctrace claude --print "explain this repo"
 
-# Terminal B — attach and render the live dashboard.
-# sudo prompts once to start eslogger. With no pid, ctrace finds the running
-# claude (or lets you pick if several are running).
+# Terminal B — follow it live (auto-picks the live session)
+ctrace view
+```
+
+**Attach to a claude that's already running:**
+
+```sh
+# Terminal B — sudo prompts once to start eslogger. With no pid, ctrace finds
+# the running claude (or lets you pick if several are running).
 ctrace attach
 ctrace attach <pid>
 ```
 
-`attach` records to disk **and** draws the live TUI, since claude is in its own terminal.
-
-**Launch + record, replay later** (claude owns the terminal, so no TUI is drawn):
+**Replay & inspect recordings** — every run is saved, so `view` works after the fact too:
 
 ```sh
-ctrace                                 # trace `claude` with no extra args
-ctrace claude --print "explain this repo"
-ctrace exec -- npm test                # testing hatch: trace any command
-
-ctrace view                            # replay in the TUI (picker)
+ctrace view                            # follows the live session, else opens the picker
 ctrace view --latest
 ctrace view <session-id-prefix>
 ctrace list                            # sessions as a text table
+ctrace exec -- npm test                # testing hatch: trace any command
 ```
 
 If a trace crashes and leaves files in an odd state, run `ctrace fix-perms`.
