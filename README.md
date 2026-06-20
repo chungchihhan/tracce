@@ -82,6 +82,43 @@ Keys: `Tab` / `Shift-Tab` cycle focus (incl. follow-all) · `1`–`5` show/hide 
 - Sensitive paths (`.env`, `~/.aws`, `~/.ssh`, `*.pem`, etc.) get a `⚠` glyph
 - If eslogger can't start (sudo declined), ctrace degrades to poll-only: process tree + network + claude tool calls, but no file open/write/delete events
 
+## Security & trust
+
+ctrace asks for `sudo` on start, which is a fair thing to be cautious about —
+especially for a tool whose whole job is auditing what software does. Here's
+exactly what that privilege buys and where it stops:
+
+- **Only one thing runs as root:** `/usr/bin/eslogger`, Apple's own signed
+  binary, with a fixed argument list:
+
+  ```
+  sudo /usr/bin/eslogger exec fork exit open close create write unlink rename
+  ```
+
+  Those are the kernel event types it subscribes to. macOS Endpoint Security is
+  a privileged API, so reading these events requires root — there's no
+  unprivileged path to them.
+
+- **ctrace itself never runs as root.** Your ctrace process stays as you; it
+  just reads the event stream that the root `eslogger` child writes to a pipe.
+
+- **No user input reaches the privileged command.** The argument list is
+  hardcoded, the paths are absolute, and there's no shell — nothing you type
+  (PIDs, paths, anything) is ever interpolated into the command run as root.
+
+- **No standing privilege.** `eslogger` is a transient child, killed when the
+  trace ends. ctrace installs no daemon, no setuid binary, and makes no changes
+  to your sudoers — every trace prompts (or reuses your normal sudo cache).
+
+- **Read-only by design.** eslogger *observes*; it cannot block or modify
+  anything. ctrace is not a sandbox (see below).
+
+- **Auditable.** It's open source, and the entire sudo invocation lives in one
+  function — `bring_up_eslogger` in `src/trace/run.rs`. Read it.
+
+- **You can decline.** Say no to the prompt and ctrace degrades to poll-only
+  (process tree + network + claude tool calls), with no file events.
+
 ## Limitations
 
 - macOS only
