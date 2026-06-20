@@ -8,49 +8,76 @@ and it works on both Apple Silicon and Intel. Users install with:
 brew install chungchihhan/tap/ctrace
 ```
 
-## One-time setup: create the tap
+Releases are automated: **push a tag and a GitHub Action does the rest.**
 
-A "tap" is just a public GitHub repo named `homebrew-tap`.
+## One-time setup
 
-1. Create a public repo `chungchihhan/homebrew-tap` (web UI, or
-   `gh auth login` to github.com then `gh repo create chungchihhan/homebrew-tap --public`).
-2. Add the formula at `Formula/ctrace.rb` — copy it from this repo's
-   `packaging/homebrew/ctrace.rb`.
-3. Commit and push.
+### 1. Create the tap (done once, shared by all your projects)
 
-That's it. `brew install chungchihhan/tap/ctrace` resolves
-`chungchihhan/tap` → the `homebrew-tap` repo → `Formula/ctrace.rb`.
+A "tap" is just a public GitHub repo named `homebrew-tap`. One tap can hold many
+formulae (`Formula/ctrace.rb`, `Formula/other-project.rb`, …), so you only ever
+create this once.
+
+```
+chungchihhan/homebrew-tap
+└── Formula/
+    └── ctrace.rb
+```
+
+Seed it with the current formula (the Action edits an existing file, so it must
+exist before the first tagged release):
+
+```
+# from this repo
+cp packaging/homebrew/ctrace.rb /path/to/homebrew-tap/Formula/ctrace.rb
+# commit & push the tap repo
+```
+
+### 2. Add the COMMITTER_TOKEN secret
+
+The Action runs in the `ctrace` repo but needs to push to `homebrew-tap`. The
+default `GITHUB_TOKEN` can't write to another repo, so create a Personal Access
+Token:
+
+- **Fine-grained PAT** — Repository access: `chungchihhan/homebrew-tap`;
+  Permissions: Contents → Read and write. (Or a classic PAT with `public_repo`.)
+
+Then add it to the **ctrace** repo: Settings → Secrets and variables → Actions →
+New repository secret, named `COMMITTER_TOKEN`.
 
 ## Per release
 
-1. Bump `version` in `Cargo.toml`, update `Cargo.lock` (`cargo build`), commit.
-2. From this repo, run:
+1. Bump `version` in `Cargo.toml`, run `cargo build` to refresh `Cargo.lock`,
+   commit, and push `main`.
+2. Tag and push:
 
    ```
-   scripts/cut-release.sh           # uses Cargo.toml version
-   # or: scripts/cut-release.sh 0.2.0
+   git tag v0.2.0
+   git push origin v0.2.0
    ```
 
-   This tags `vX.Y.Z`, pushes the tag, computes the source-tarball sha256, and
-   rewrites `packaging/homebrew/ctrace.rb` with the new `url` + `sha256`.
-3. Copy the updated `packaging/homebrew/ctrace.rb` into the tap repo as
-   `Formula/ctrace.rb`, then commit and push the tap.
-4. Verify a clean install:
+The `release` workflow then:
+- creates a GitHub release with generated notes, and
+- bumps `Formula/ctrace.rb` in the tap (new `url` + `sha256`).
 
-   ```
-   brew update
-   brew install --build-from-source chungchihhan/tap/ctrace
-   ctrace --version
-   ```
+Users get it with `brew upgrade ctrace` (or a fresh `brew install
+chungchihhan/tap/ctrace`).
 
-Users upgrade with `brew upgrade ctrace`.
+## Manual fallback
+
+If you ever need to cut a release without CI, `scripts/cut-release.sh` does the
+same formula bump locally: it tags, pushes, computes the source-tarball sha256,
+and rewrites `packaging/homebrew/ctrace.rb`. Copy that into the tap by hand.
 
 ## Notes
 
 - `depends_on "rust" => :build` pulls in a Rust toolchain at build time; users
-  don't need Rust installed beforehand. They do need the Xcode Command Line
-  Tools, which Homebrew already requires.
-- The formula's `head` URL lets adventurous users run `brew install --HEAD
-  chungchihhan/tap/ctrace` to build the latest `main`.
-- A `cargo install --git https://github.com/chungchihhan/ctrace` path also works
-  for anyone who already has Rust and doesn't want Homebrew.
+  don't need Rust installed beforehand (they do need the Xcode Command Line
+  Tools, which Homebrew already requires).
+- The formula's `head` URL lets adventurous users run
+  `brew install --HEAD chungchihhan/tap/ctrace` to build the latest `main`.
+- `cargo install --git https://github.com/chungchihhan/ctrace` also works for
+  anyone who already has Rust and doesn't want Homebrew.
+- Want `brew install` to *not* compile on the user's machine? That means
+  shipping prebuilt bottles from CI (and dealing with macOS notarization) —
+  a larger change we can add later.
