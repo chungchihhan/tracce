@@ -1,7 +1,7 @@
 use std::process::Command;
 
 fn bin() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_ctrace"))
+    Command::new(env!("CARGO_BIN_EXE_tracce"))
 }
 
 #[test]

@@ -1,10 +1,10 @@
 ```text
- ██████╗████████╗██████╗  █████╗  ██████╗███████╗
-██╔════╝╚══██╔══╝██╔══██╗██╔══██╗██╔════╝██╔════╝
-██║        ██║   ██████╔╝███████║██║     █████╗
-██║        ██║   ██╔══██╗██╔══██║██║     ██╔══╝
-╚██████╗   ██║   ██║  ██║██║  ██║╚██████╗███████╗
- ╚═════╝   ╚═╝   ╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝╚══════╝
+████████╗██████╗  █████╗  ██████╗ ██████╗███████╗
+╚══██╔══╝██╔══██╗██╔══██╗██╔════╝██╔════╝██╔════╝
+   ██║   ██████╔╝███████║██║     ██║     █████╗
+   ██║   ██╔══██╗██╔══██║██║     ██║     ██╔══╝
+   ██║   ██║  ██║██║  ██║╚██████╗╚██████╗███████╗
+   ╚═╝   ╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝ ╚═════╝╚══════╝
 ```
 
 <div align="center">
@@ -18,7 +18,7 @@ network connection, live in your terminal or replayed later.
 ![built with Rust](https://img.shields.io/badge/built%20with-Rust-CE412B?logo=rust&logoColor=white)
 ![install](https://img.shields.io/badge/install-Homebrew-FBB040?logo=homebrew&logoColor=white)
 ![license](https://img.shields.io/badge/license-MIT-blue)
-![release](https://img.shields.io/github/v/release/chungchihhan/ctrace?color=success&label=release)
+![release](https://img.shields.io/github/v/release/chungchihhan/tracce?color=success&label=release)
 
 </div>
 
@@ -26,31 +26,31 @@ network connection, live in your terminal or replayed later.
 
 ---
 
-## Why ctrace
+## Why tracce
 
 - **Live process tree** — every descendant of the traced process, with per-process event counts
 - **File activity** — opens, writes, creates, deletes, renames — with a `⚠` on sensitive paths (`.env`, `~/.ssh`, `*.pem`, …)
 - **Claude's intent, too** — reads Edit / Write / Read tool calls and the exact Bash command from the session transcript, shown next to kernel truth
 - **Network** — remote hosts and their connection counts
 - **Events/s** — a live bar graph with a real time axis you can scrub and zoom
-- **Record & replay** — every session is written to JSONL, so you can `ctrace view` it later
-- **Minimal privilege** — only Apple's signed `eslogger` runs as root, with a hardcoded argument list; ctrace itself never does
+- **Record & replay** — every session is written to JSONL, so you can `tracce view` it later
+- **Minimal privilege** — only Apple's signed `eslogger` runs as root, with a hardcoded argument list; tracce itself never does
 
 > [!NOTE]
 > Personal/audit tool, macOS only. Your terminal app needs **Full Disk Access**.
-> ctrace runs as you and uses `sudo` only to launch `eslogger` (the default event
+> tracce runs as you and uses `sudo` only to launch `eslogger` (the default event
 > source). Decline the prompt and it degrades to poll-only — no file events.
 
 ## Quick start
 
 ```sh
-brew install chungchihhan/tap/ctrace
+brew install chungchihhan/tap/tracce
 
 # Terminal A — start a Claude Code session, traced
-ctrace claude
+tracce claude
 
 # Terminal B — watch it live (and replay anytime later)
-ctrace view
+tracce view
 ```
 
 ## Install
@@ -59,19 +59,19 @@ ctrace view
 <summary><b>Homebrew</b> (recommended)</summary>
 
 ```sh
-brew install chungchihhan/tap/ctrace
+brew install chungchihhan/tap/tracce
 ```
 
 Builds from source via the tap, so it works on Apple Silicon and Intel with no
 code-signing prompts. Homebrew pulls in the Rust toolchain automatically; you
-just need the Xcode Command Line Tools. Upgrade with `brew upgrade ctrace`.
+just need the Xcode Command Line Tools. Upgrade with `brew upgrade tracce`.
 </details>
 
 <details>
 <summary><b>cargo</b> (needs Rust)</summary>
 
 ```sh
-cargo install --git https://github.com/chungchihhan/ctrace
+cargo install --git https://github.com/chungchihhan/tracce
 ```
 </details>
 
@@ -79,10 +79,10 @@ cargo install --git https://github.com/chungchihhan/ctrace
 <summary><b>From source</b></summary>
 
 ```sh
-git clone https://github.com/chungchihhan/ctrace
-cd ctrace
+git clone https://github.com/chungchihhan/tracce
+cd tracce
 cargo build --release
-sudo cp target/release/ctrace /usr/local/bin/
+sudo cp target/release/tracce /usr/local/bin/
 ```
 </details>
 
@@ -91,37 +91,37 @@ sudo cp target/release/ctrace /usr/local/bin/
 The dashboard always runs in a second terminal — Claude Code is itself a TUI and
 can't share one. There are two ways to get there.
 
-**Launch claude under ctrace, watch with `view`** (recommended):
+**Launch claude under tracce, watch with `view`** (recommended):
 
 ```sh
 # Terminal A — start a traced Claude Code session (claude owns this terminal)
-ctrace claude
-ctrace claude --print "explain this repo"
+tracce claude
+tracce claude --print "explain this repo"
 
 # Terminal B — follow it live (auto-picks the live session)
-ctrace view
+tracce view
 ```
 
 **Attach to a claude that's already running:**
 
 ```sh
-# Terminal B — sudo prompts once to start eslogger. With no pid, ctrace finds
+# Terminal B — sudo prompts once to start eslogger. With no pid, tracce finds
 # the running claude (or lets you pick if several are running).
-ctrace attach
-ctrace attach <pid>
+tracce attach
+tracce attach <pid>
 ```
 
 **Replay & inspect recordings** — every run is saved, so `view` works after the fact too:
 
 ```sh
-ctrace view                            # follows the live session, else opens the picker
-ctrace view --latest
-ctrace view <session-id-prefix>
-ctrace list                            # sessions as a text table
-ctrace exec -- npm test                # testing hatch: trace any command
+tracce view                            # follows the live session, else opens the picker
+tracce view --latest
+tracce view <session-id-prefix>
+tracce list                            # sessions as a text table
+tracce exec -- npm test                # testing hatch: trace any command
 ```
 
-If a trace crashes and leaves files in an odd state, run `ctrace fix-perms`.
+If a trace crashes and leaves files in an odd state, run `tracce fix-perms`.
 
 ## The dashboard
 
@@ -166,11 +166,11 @@ path / argv / host, untruncated, plus when it happened). On the focused EVENTS/s
 - Events are filtered to the descendant tree of the traced process
 - Bursts (e.g. ripgrep) are coalesced in the live view; raw events still go to JSONL
 - Sensitive paths (`.env`, `~/.aws`, `~/.ssh`, `*.pem`, etc.) get a `⚠` glyph
-- If eslogger can't start (sudo declined), ctrace degrades to poll-only: process tree + network + claude tool calls, but no file open/write/delete events
+- If eslogger can't start (sudo declined), tracce degrades to poll-only: process tree + network + claude tool calls, but no file open/write/delete events
 
 ## Security & trust
 
-ctrace asks for `sudo` on start, which is a fair thing to be cautious about —
+tracce asks for `sudo` on start, which is a fair thing to be cautious about —
 especially for a tool whose whole job is auditing what software does. Here's
 exactly what that privilege buys and where it stops:
 
@@ -185,7 +185,7 @@ exactly what that privilege buys and where it stops:
   a privileged API, so reading these events requires root — there's no
   unprivileged path to them.
 
-- **ctrace itself never runs as root.** Your ctrace process stays as you; it
+- **tracce itself never runs as root.** Your tracce process stays as you; it
   just reads the event stream that the root `eslogger` child writes to a pipe.
 
 - **No user input reaches the privileged command.** The argument list is
@@ -193,16 +193,16 @@ exactly what that privilege buys and where it stops:
   (PIDs, paths, anything) is ever interpolated into the command run as root.
 
 - **No standing privilege.** `eslogger` is a transient child, killed when the
-  trace ends. ctrace installs no daemon, no setuid binary, and makes no changes
+  trace ends. tracce installs no daemon, no setuid binary, and makes no changes
   to your sudoers — every trace prompts (or reuses your normal sudo cache).
 
 - **Read-only by design.** eslogger *observes*; it cannot block or modify
-  anything. ctrace is not a sandbox (see below).
+  anything. tracce is not a sandbox (see below).
 
 - **Auditable.** It's open source, and the entire sudo invocation lives in one
   function — `bring_up_eslogger` in `src/trace/run.rs`. Read it.
 
-- **You can decline.** Say no to the prompt and ctrace degrades to poll-only
+- **You can decline.** Say no to the prompt and tracce degrades to poll-only
   (process tree + network + claude tool calls), with no file events.
 
 ## Limitations
@@ -211,7 +211,7 @@ exactly what that privilege buys and where it stops:
 - Network bytes are approximations (poll-based, not kernel-traced)
 - Very short-lived connections (< 500 ms) may be missed
 - `attach` captures from the attach moment forward — it can't replay what claude did before you attached
-- Not a sandbox — ctrace only observes
+- Not a sandbox — tracce only observes
 
 ## License
 

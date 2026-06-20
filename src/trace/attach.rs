@@ -39,8 +39,8 @@ pub fn run(pid: Option<u32>, root: &Path) -> Result<()> {
         .unwrap_or_default();
     let tracer_pid = std::process::id();
 
-    eprintln!("ctrace · attaching to pid {target_pid} ({command})");
-    eprintln!("ctrace · cwd {}", cwd.display());
+    eprintln!("tracce · attaching to pid {target_pid} ({command})");
+    eprintln!("tracce · cwd {}", cwd.display());
 
     // Raw events channel — shared by eslogger (if active), the tree/network
     // pollers, and the claude transcript tailer.
@@ -62,7 +62,7 @@ pub fn run(pid: Option<u32>, root: &Path) -> Result<()> {
     };
 
     let session = Session::create(root, target_pid, tracer_pid, &argv, &cwd)?;
-    eprintln!("ctrace · recording to {}", session.dir().display());
+    eprintln!("tracce · recording to {}", session.dir().display());
 
     let mut tree = PidTree::new(target_pid);
     tree.seed_descendants();
@@ -90,7 +90,7 @@ pub fn run(pid: Option<u32>, root: &Path) -> Result<()> {
     persist_handle.join().ok();
 
     session.mark_status(SessionStatus::Done)?;
-    eprintln!("ctrace · detached · session: {}", session.dir().display());
+    eprintln!("tracce · detached · session: {}", session.dir().display());
 
     render_result
 }
@@ -108,7 +108,7 @@ fn select_pid(explicit: Option<u32>) -> Result<u32> {
     match found.len() {
         0 => Err(anyhow!(
             "no running `claude` process found — start claude first, \
-             or attach to a specific pid: `ctrace attach <pid>`"
+             or attach to a specific pid: `tracce attach <pid>`"
         )),
         1 => Ok(found[0].0),
         _ => {
@@ -345,7 +345,7 @@ fn pick_process(rows: Vec<ProcRow>, current_dir: String) -> Result<Option<u32>> 
     use ratatui::Terminal;
     use std::io::stdout;
 
-    // Indices of rows whose cwd is the directory ctrace was launched from.
+    // Indices of rows whose cwd is the directory tracce was launched from.
     let in_dir: Vec<usize> = rows
         .iter()
         .enumerate()
@@ -470,7 +470,7 @@ fn pick_process(rows: Vec<ProcRow>, current_dir: String) -> Result<Option<u32>> 
             };
             let block = Block::default()
                 .borders(Borders::ALL)
-                .title(format!(" ctrace · attach to which claude?  [{scope}]  (↑/↓, Enter, q) "));
+                .title(format!(" tracce · attach to which claude?  [{scope}]  (↑/↓, Enter, q) "));
             let list = List::new(items)
                 .block(block)
                 .highlight_symbol("▸ ");

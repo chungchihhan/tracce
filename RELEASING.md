@@ -1,11 +1,11 @@
-# Releasing ctrace
+# Releasing tracce
 
-ctrace ships through a **Homebrew tap** that builds from source. No code signing
+tracce ships through a **Homebrew tap** that builds from source. No code signing
 or notarization is required, because Homebrew compiles on the user's machine,
 and it works on both Apple Silicon and Intel. Users install with:
 
 ```
-brew install chungchihhan/tap/ctrace
+brew install chungchihhan/tap/tracce
 ```
 
 Releases are automated: **push a tag and a GitHub Action does the rest.**
@@ -15,13 +15,13 @@ Releases are automated: **push a tag and a GitHub Action does the rest.**
 ### 1. Create the tap (done once, shared by all your projects)
 
 A "tap" is just a public GitHub repo named `homebrew-tap`. One tap can hold many
-formulae (`Formula/ctrace.rb`, `Formula/other-project.rb`, …), so you only ever
+formulae (`Formula/tracce.rb`, `Formula/other-project.rb`, …), so you only ever
 create this once.
 
 ```
 chungchihhan/homebrew-tap
 └── Formula/
-    └── ctrace.rb
+    └── tracce.rb
 ```
 
 Seed it with the current formula (the Action edits an existing file, so it must
@@ -29,20 +29,20 @@ exist before the first tagged release):
 
 ```
 # from this repo
-cp packaging/homebrew/ctrace.rb /path/to/homebrew-tap/Formula/ctrace.rb
+cp packaging/homebrew/tracce.rb /path/to/homebrew-tap/Formula/tracce.rb
 # commit & push the tap repo
 ```
 
 ### 2. Add the COMMITTER_TOKEN secret
 
-The Action runs in the `ctrace` repo but needs to push to `homebrew-tap`. The
+The Action runs in the `tracce` repo but needs to push to `homebrew-tap`. The
 default `GITHUB_TOKEN` can't write to another repo, so create a Personal Access
 Token:
 
 - **Fine-grained PAT** — Repository access: `chungchihhan/homebrew-tap`;
   Permissions: Contents → Read and write. (Or a classic PAT with `public_repo`.)
 
-Then add it to the **ctrace** repo: Settings → Secrets and variables → Actions →
+Then add it to the **tracce** repo: Settings → Secrets and variables → Actions →
 New repository secret, named `COMMITTER_TOKEN`.
 
 ## Per release
@@ -58,16 +58,16 @@ New repository secret, named `COMMITTER_TOKEN`.
 
 The `release` workflow then:
 - creates a GitHub release with generated notes, and
-- bumps `Formula/ctrace.rb` in the tap (new `url` + `sha256`).
+- bumps `Formula/tracce.rb` in the tap (new `url` + `sha256`).
 
-Users get it with `brew upgrade ctrace` (or a fresh `brew install
-chungchihhan/tap/ctrace`).
+Users get it with `brew upgrade tracce` (or a fresh `brew install
+chungchihhan/tap/tracce`).
 
 ## Manual fallback
 
 If you ever need to cut a release without CI, `scripts/cut-release.sh` does the
 same formula bump locally: it tags, pushes, computes the source-tarball sha256,
-and rewrites `packaging/homebrew/ctrace.rb`. Copy that into the tap by hand.
+and rewrites `packaging/homebrew/tracce.rb`. Copy that into the tap by hand.
 
 ## Notes
 
@@ -75,8 +75,8 @@ and rewrites `packaging/homebrew/ctrace.rb`. Copy that into the tap by hand.
   don't need Rust installed beforehand (they do need the Xcode Command Line
   Tools, which Homebrew already requires).
 - The formula's `head` URL lets adventurous users run
-  `brew install --HEAD chungchihhan/tap/ctrace` to build the latest `main`.
-- `cargo install --git https://github.com/chungchihhan/ctrace` also works for
+  `brew install --HEAD chungchihhan/tap/tracce` to build the latest `main`.
+- `cargo install --git https://github.com/chungchihhan/tracce` also works for
   anyone who already has Rust and doesn't want Homebrew.
 - Want `brew install` to *not* compile on the user's machine? That means
   shipping prebuilt bottles from CI (and dealing with macOS notarization) —

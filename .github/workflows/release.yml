@@ -5,7 +5,7 @@ name: release
 #   git tag v0.2.0 && git push origin v0.2.0
 #
 # This creates a GitHub release and bumps the formula in the Homebrew tap so
-# `brew install chungchihhan/tap/ctrace` picks up the new version. The tap is
+# `brew install chungchihhan/tap/tracce` picks up the new version. The tap is
 # build-from-source, so nothing is compiled here — the formula just points at
 # the new source tarball with an updated sha256.
 
@@ -32,7 +32,7 @@ jobs:
       - name: Bump Homebrew tap formula
         uses: mislav/bump-homebrew-formula-action@v3
         with:
-          formula-name: ctrace
+          formula-name: tracce
           homebrew-tap: chungchihhan/homebrew-tap
           # download-url defaults to this repo's source tarball for the pushed
           # tag, which is exactly what the build-from-source formula needs.

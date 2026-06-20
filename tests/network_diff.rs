@@ -1,4 +1,4 @@
-use ctrace::trace::network::{parse_lsof, diff_connections, Connection};
+use tracce::trace::network::{parse_lsof, diff_connections, Connection};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 #[test]

@@ -73,7 +73,7 @@ mod tests {
     #[test]
     fn ignores_innocuous() {
         assert!(!is_sensitive(Path::new("/tmp/foo.txt")));
-        assert!(!is_sensitive(Path::new("/Users/x/Developer/ctrace/README.md")));
+        assert!(!is_sensitive(Path::new("/Users/x/Developer/tracce/README.md")));
     }
 
     #[test]

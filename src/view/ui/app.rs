@@ -17,15 +17,15 @@ const EVENTS_BAND_H: u16 = 11;
 /// Vertical bar glyphs by eighths (0..=8) for the EVENTS/s bar graph.
 const BAR8: [char; 9] = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 
-/// ctrace wordmark, shown atop the help and quit modals. All rows are padded to
+/// tracce wordmark, shown atop the help and quit modals. All rows are padded to
 /// the same width so centered alignment stays flush.
 const LOGO: [&str; 6] = [
-    " ██████╗████████╗██████╗  █████╗  ██████╗███████╗",
-    "██╔════╝╚══██╔══╝██╔══██╗██╔══██╗██╔════╝██╔════╝",
-    "██║        ██║   ██████╔╝███████║██║     █████╗  ",
-    "██║        ██║   ██╔══██╗██╔══██║██║     ██╔══╝  ",
-    "╚██████╗   ██║   ██║  ██║██║  ██║╚██████╗███████╗",
-    " ╚═════╝   ╚═╝   ╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝╚══════╝",
+    "████████╗██████╗  █████╗  ██████╗ ██████╗███████╗",
+    "╚══██╔══╝██╔══██╗██╔══██╗██╔════╝██╔════╝██╔════╝",
+    "   ██║   ██████╔╝███████║██║     ██║     █████╗  ",
+    "   ██║   ██╔══██╗██╔══██║██║     ██║     ██╔══╝  ",
+    "   ██║   ██║  ██║██║  ██║╚██████╗╚██████╗███████╗",
+    "   ╚═╝   ╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝ ╚═════╝╚══════╝",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -752,7 +752,7 @@ impl App {
             Style::default().fg(Color::DarkGray)
         };
         let status = Line::from(vec![
-            Span::styled("ctrace ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::styled("tracce ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
             Span::raw("· "), live_span,
             Span::raw(format!(" · {id} · uptime {}", self.uptime_str())),
             pause_span,
@@ -1156,7 +1156,7 @@ impl App {
 
     fn draw_quit(&self, f: &mut Frame, area: Rect) {
         let rect = centered_fixed(58, 16, area);
-        let block = modal_block(" Quit ctrace? ");
+        let block = modal_block(" Quit tracce? ");
         let inner = block.inner(rect);
         f.render_widget(Clear, rect);
         f.render_widget(block, rect);
@@ -1334,7 +1334,7 @@ fn modal_block(title: &str) -> Block<'static> {
         )))
 }
 
-/// The ctrace wordmark as centered, cyan-bold lines for modal headers.
+/// The tracce wordmark as centered, cyan-bold lines for modal headers.
 pub(crate) fn logo_lines() -> Vec<Line<'static>> {
     LOGO.iter()
         .map(|l| {
@@ -1493,7 +1493,7 @@ mod tests {
             tracer_pid: 0,
             hostname: "h".into(),
             macos_version: "x".into(),
-            ctrace_version: "0".into(),
+            tracce_version: "0".into(),
         };
         let entry = SessionEntry {
             dir: PathBuf::from("/tmp"),

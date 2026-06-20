@@ -1,5 +1,5 @@
-use ctrace::event::{Event, EventData, EventKind, ProcessRef};
-use ctrace::trace::persist::Persist;
+use tracce::event::{Event, EventData, EventKind, ProcessRef};
+use tracce::trace::persist::Persist;
 use std::sync::Arc;
 use tempfile::NamedTempFile;
 

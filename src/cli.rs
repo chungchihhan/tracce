@@ -3,13 +3,13 @@ use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "ctrace",
+    name = "tracce",
     version,
     about = "macOS tracer for Claude Code sessions",
     long_about = "Trace what a Claude Code session does on your machine.\n\n\
-                  Run `ctrace` (or `ctrace claude …`) to launch and record claude.\n\
-                  Run `ctrace attach` in a second terminal to watch a running\n\
-                  claude live. Run `ctrace view` to replay a recorded session."
+                  Run `tracce` (or `tracce claude …`) to launch and record claude.\n\
+                  Run `tracce attach` in a second terminal to watch a running\n\
+                  claude live. Run `tracce view` to replay a recorded session."
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -20,7 +20,7 @@ pub struct Cli {
 pub enum Cmd {
     /// Launch and record a Claude Code session (this is the default when no
     /// subcommand is given). claude owns the terminal, so no TUI is drawn —
-    /// replay the recording later with `ctrace view`.
+    /// replay the recording later with `tracce view`.
     Claude {
         /// Arguments forwarded verbatim to `claude`.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -34,7 +34,7 @@ pub enum Cmd {
         pid: Option<u32>,
     },
     /// Launch and record an arbitrary command — a testing hatch for exercising
-    /// ctrace's features without claude in the loop. e.g. `ctrace exec -- npm test`.
+    /// tracce's features without claude in the loop. e.g. `tracce exec -- npm test`.
     Exec {
         /// The command and its arguments to trace.
         #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
@@ -66,9 +66,9 @@ pub fn parse() -> Cli {
 
 #[allow(dead_code)]
 pub fn root_dir() -> PathBuf {
-    if let Ok(p) = std::env::var("CTRACE_HOME") {
+    if let Ok(p) = std::env::var("TRACCE_HOME") {
         return PathBuf::from(p);
     }
     let home = std::env::var("HOME").expect("HOME must be set");
-    PathBuf::from(home).join(".ctrace")
+    PathBuf::from(home).join(".tracce")
 }

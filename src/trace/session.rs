@@ -33,7 +33,7 @@ pub struct Meta {
     pub tracer_pid: u32,
     pub hostname: String,
     pub macos_version: String,
-    pub ctrace_version: String,
+    pub tracce_version: String,
 }
 
 #[derive(Debug)]
@@ -88,7 +88,7 @@ impl Session {
             tracer_pid,
             hostname: hostname(),
             macos_version: macos_version(),
-            ctrace_version: env!("CARGO_PKG_VERSION").to_string(),
+            tracce_version: env!("CARGO_PKG_VERSION").to_string(),
         };
         write_meta(&dir, &meta)?;
 

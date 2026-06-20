@@ -1,4 +1,4 @@
-use ctrace::view::discovery::{discover, SessionEntry};
+use tracce::view::discovery::{discover, SessionEntry};
 use tempfile::TempDir;
 
 fn touch_session(root: &std::path::Path, id: &str, status: &str, started: &str) {
@@ -19,7 +19,7 @@ fn touch_session(root: &std::path::Path, id: &str, status: &str, started: &str) 
         "tracer_pid": {tracer_pid},
         "hostname": "h",
         "macos_version": "15.4",
-        "ctrace_version": "0.1.0"
+        "tracce_version": "0.1.0"
     }}"#)).unwrap();
 }
 
@@ -47,10 +47,10 @@ fn discover_orders_live_first_then_recent() {
 
 #[test]
 fn app_ingests_events_into_panes() {
-    use ctrace::event::{Event, EventData, EventKind, FileOp, ProcessRef};
-    use ctrace::view::discovery::SessionEntry;
-    use ctrace::view::ui::app::App;
-    use ctrace::trace::session::Meta;
+    use tracce::event::{Event, EventData, EventKind, FileOp, ProcessRef};
+    use tracce::view::discovery::SessionEntry;
+    use tracce::view::ui::app::App;
+    use tracce::trace::session::Meta;
     use std::sync::Arc;
 
     let session = SessionEntry {
@@ -62,7 +62,7 @@ fn app_ingests_events_into_panes() {
             cwd: "/tmp".into(),
             argv: vec!["claude".into()],
             claude_pid: 1, tracer_pid: 2,
-            hostname: "h".into(), macos_version: "15".into(), ctrace_version: "0.1".into(),
+            hostname: "h".into(), macos_version: "15".into(), tracce_version: "0.1".into(),
         },
         status: "live".into(),
         events_path: "/tmp/events.jsonl".into(),
@@ -96,10 +96,10 @@ fn discover_marks_stale_live_as_crashed() {
         "tracer_pid": 4294967290,
         "hostname": "h",
         "macos_version": "15.4",
-        "ctrace_version": "0.1.0"
+        "tracce_version": "0.1.0"
     }}"#)).unwrap();
 
-    let entries = ctrace::view::discovery::discover(root.path()).unwrap();
+    let entries = tracce::view::discovery::discover(root.path()).unwrap();
     let entry = entries.iter().find(|e| e.meta.session_id == id).unwrap();
     assert_eq!(entry.status, "crashed");
     let status = std::fs::read_to_string(root.path().join("sessions").join(id).join("status")).unwrap();
