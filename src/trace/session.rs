@@ -33,6 +33,8 @@ pub struct Meta {
     pub tracer_pid: u32,
     pub hostname: String,
     pub macos_version: String,
+    // `alias` keeps sessions recorded before the ctrace→tracce rename readable.
+    #[serde(alias = "ctrace_version")]
     pub tracce_version: String,
 }
 
