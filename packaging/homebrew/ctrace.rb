@@ -15,6 +15,13 @@ class Ctrace < Formula
 
   def caveats
     <<~EOS
+       ██████╗████████╗██████╗  █████╗  ██████╗███████╗
+      ██╔════╝╚══██╔══╝██╔══██╗██╔══██╗██╔════╝██╔════╝
+      ██║        ██║   ██████╔╝███████║██║     █████╗
+      ██║        ██║   ██╔══██╗██╔══██║██║     ██╔══╝
+      ╚██████╗   ██║   ██║  ██║██║  ██║╚██████╗███████╗
+       ╚═════╝   ╚═╝   ╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝╚══════╝
+
       ctrace reads kernel events via `sudo /usr/bin/eslogger`, so it prompts for
       your password on start. eslogger ships with macOS 13+. Your terminal app
       may also need Full Disk Access (System Settings > Privacy & Security).
