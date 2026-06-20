@@ -1,6 +1,6 @@
-use ctrace::event::{Event, EventData, EventKind, FileOp, ProcessRef, FLAG_SENSITIVE, FLAG_COALESCED};
-use ctrace::trace::aggregator::Aggregator;
-use ctrace::trace::pid_tree::PidTree;
+use tracce::event::{Event, EventData, EventKind, FileOp, ProcessRef, FLAG_SENSITIVE, FLAG_COALESCED};
+use tracce::trace::aggregator::Aggregator;
+use tracce::trace::pid_tree::PidTree;
 use std::sync::Arc;
 
 fn file_event(ts: u64, pid: u32, path: &str) -> Event {

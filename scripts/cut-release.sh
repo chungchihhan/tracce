@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Cut a ctrace release and update the Homebrew formula's url + sha256.
+# Cut a tracce release and update the Homebrew formula's url + sha256.
 #
 #   scripts/cut-release.sh [version]
 #
 # version defaults to the one in Cargo.toml. The script tags vX.Y.Z, pushes the
 # tag, downloads the GitHub source tarball, computes its sha256, and rewrites
-# packaging/homebrew/ctrace.rb. You then copy that formula into your tap repo.
+# packaging/homebrew/tracce.rb. You then copy that formula into your tap repo.
 
-REPO="chungchihhan/ctrace"
+REPO="chungchihhan/tracce"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-FORMULA="$ROOT/packaging/homebrew/ctrace.rb"
+FORMULA="$ROOT/packaging/homebrew/tracce.rb"
 
 ver="${1:-$(grep -m1 '^version' "$ROOT/Cargo.toml" | sed -E 's/.*"([^"]+)".*/\1/')}"
 tag="v$ver"
@@ -22,7 +22,7 @@ if [ -n "$(git -C "$ROOT" status --porcelain)" ]; then
 fi
 
 echo "==> Tagging $tag"
-git -C "$ROOT" tag -a "$tag" -m "ctrace $ver"
+git -C "$ROOT" tag -a "$tag" -m "tracce $ver"
 git -C "$ROOT" push origin "$tag"
 
 url="https://github.com/$REPO/archive/refs/tags/$tag.tar.gz"
@@ -39,7 +39,7 @@ cat <<EOF
 
 Done. Next steps:
   1) Review the formula:        $FORMULA
-  2) Copy it into the tap repo: Formula/ctrace.rb
+  2) Copy it into the tap repo: Formula/tracce.rb
   3) Commit & push the tap repo
-  4) Verify:                    brew install --build-from-source chungchihhan/tap/ctrace
+  4) Verify:                    brew install --build-from-source chungchihhan/tap/tracce
 EOF

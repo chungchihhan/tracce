@@ -1,5 +1,5 @@
 [package]
-name = "ctrace"
+name = "tracce"
 version = "0.1.0"
 edition = "2021"
 description = "macOS kernel-event tracer for Claude Code sessions"
@@ -7,11 +7,11 @@ license = "MIT"
 rust-version = "1.75"
 
 [[bin]]
-name = "ctrace"
+name = "tracce"
 path = "src/main.rs"
 
 [lib]
-name = "ctrace"
+name = "tracce"
 path = "src/lib.rs"
 
 [dependencies]

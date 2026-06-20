@@ -54,7 +54,7 @@ fn draw(f: &mut Frame, entries: &[SessionEntry], counts: &[usize], state: &mut L
 
     // Outer frame: rounded cyan border, matching the dashboard chrome.
     let title = Line::from(vec![
-        Span::styled(" ctrace ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+        Span::styled(" tracce ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
         Span::styled(
             format!("· {} session{} ", entries.len(), if entries.len() == 1 { "" } else { "s" }),
             Style::default().fg(Color::DarkGray),

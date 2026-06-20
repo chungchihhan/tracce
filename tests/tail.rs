@@ -1,5 +1,5 @@
-use ctrace::event::{Event, EventData, EventKind, ProcessRef};
-use ctrace::view::tail::Tail;
+use tracce::event::{Event, EventData, EventKind, ProcessRef};
+use tracce::view::tail::Tail;
 use std::io::Write;
 use std::sync::Arc;
 use std::time::Duration;

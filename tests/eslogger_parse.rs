@@ -1,5 +1,5 @@
-use ctrace::trace::eslogger::parse_line;
-use ctrace::event::{EventKind, EventData, FileOp};
+use tracce::trace::eslogger::parse_line;
+use tracce::event::{EventKind, EventData, FileOp};
 
 #[test]
 fn parses_exec_fixture() {
@@ -41,11 +41,11 @@ fn unknown_event_returns_none() {
 #[test]
 fn parses_fork_fixture() {
     let raw = r#"{"event":{"fork":{"child":{"audit_token":{"pid":12345}}}},"process":{"audit_token":{"pid":1234},"ppid":1,"executable":{"path":"/bin/bash"}},"time":"2026-05-29T07:59:42.757444182Z"}"#;
-    let ev = ctrace::trace::eslogger::parse_line(raw).unwrap().expect("fork should parse");
-    assert_eq!(ev.kind, ctrace::event::EventKind::Fork);
+    let ev = tracce::trace::eslogger::parse_line(raw).unwrap().expect("fork should parse");
+    assert_eq!(ev.kind, tracce::event::EventKind::Fork);
     assert_eq!(ev.pid, 1234);
     match ev.data {
-        ctrace::event::EventData::Fork { child_pid } => {
+        tracce::event::EventData::Fork { child_pid } => {
             assert_eq!(child_pid, 12345);
         }
         _ => panic!("expected Fork data"),

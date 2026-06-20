@@ -35,7 +35,7 @@ const ESLOGGER_EVENTS: &[&str] = &[
 ];
 
 /// Launch a command, record it, and exit when it does. No TUI — the wrapped
-/// command owns the terminal (this is the `ctrace` / `ctrace claude` / `ctrace
+/// command owns the terminal (this is the `tracce` / `tracce claude` / `tracce
 /// exec` path). To watch a running claude live instead, see `attach`.
 pub fn run(argv: Vec<String>, root: PathBuf) -> Result<i32> {
     if argv.is_empty() {
@@ -66,7 +66,7 @@ pub fn run(argv: Vec<String>, root: PathBuf) -> Result<i32> {
     let child_pid = child.id();
 
     let session = Session::create(&root, child_pid, tracer_pid, &argv, &cwd)?;
-    eprintln!("ctrace · recording to {}", session.dir().display());
+    eprintln!("tracce · recording to {}", session.dir().display());
 
     let mut tree = PidTree::new(child_pid);
     tree.seed_descendants();
@@ -94,7 +94,7 @@ pub fn run(argv: Vec<String>, root: PathBuf) -> Result<i32> {
     persist_handle.join().ok();
 
     session.mark_status(SessionStatus::Done)?;
-    eprintln!("ctrace · session ended · path: {}", session.dir().display());
+    eprintln!("tracce · session ended · path: {}", session.dir().display());
 
     Ok(exit_code)
 }
@@ -121,28 +121,28 @@ pub(crate) fn bring_up_eslogger(raw_tx: SyncSender<Event>) -> (Option<ThreadStop
         .map(|s| s.success())
         .unwrap_or(false);
     if !sudo_cached {
-        eprintln!("ctrace · eslogger needs root to read kernel events. About to run as root:");
+        eprintln!("tracce · eslogger needs root to read kernel events. About to run as root:");
         eprintln!(
             "         sudo /usr/bin/eslogger {}",
             ESLOGGER_EVENTS.join(" ")
         );
         eprintln!(
-            "         Apple's own tool, read-only. ctrace itself never runs as root. Decline → poll-only."
+            "         Apple's own tool, read-only. tracce itself never runs as root. Decline → poll-only."
         );
-        eprintln!("ctrace · sudo will prompt for your password now…");
+        eprintln!("tracce · sudo will prompt for your password now…");
     }
 
     let (ready_tx, ready_rx) = mpsc::channel::<EsloggerSignal>();
     let handle = match start_eslogger_thread(raw_tx, ready_tx) {
         Ok(h) => h,
         Err(e) => {
-            eprintln!("ctrace · eslogger failed to spawn: {e}");
+            eprintln!("tracce · eslogger failed to spawn: {e}");
             print_degrade_banner();
             return (None, false);
         }
     };
 
-    eprintln!("ctrace · waiting for eslogger to be ready (sudo may prompt)…");
+    eprintln!("tracce · waiting for eslogger to be ready (sudo may prompt)…");
     let timeout = if sudo_cached {
         ESLOGGER_READY_TIMEOUT
     } else {
@@ -150,7 +150,7 @@ pub(crate) fn bring_up_eslogger(raw_tx: SyncSender<Event>) -> (Option<ThreadStop
     };
     match ready_rx.recv_timeout(timeout) {
         Ok(EsloggerSignal::Ready) => {
-            eprintln!("ctrace · eslogger active — full event capture on.");
+            eprintln!("tracce · eslogger active — full event capture on.");
             (Some(handle), true)
         }
         Ok(EsloggerSignal::Exited) | Err(_) => {
@@ -165,8 +165,8 @@ pub(crate) fn bring_up_eslogger(raw_tx: SyncSender<Event>) -> (Option<ThreadStop
 }
 
 fn print_degrade_banner() {
-    eprintln!("ctrace · eslogger unavailable (sudo declined or failed to start)");
-    eprintln!("ctrace · running poll-only: process tree + network + claude tool calls.");
+    eprintln!("tracce · eslogger unavailable (sudo declined or failed to start)");
+    eprintln!("tracce · running poll-only: process tree + network + claude tool calls.");
     eprintln!("         file open/write/delete events OFF.");
 }
 
@@ -236,7 +236,7 @@ pub(crate) fn start_poll_sources(
     ) {
         Ok(h) => Some(h),
         Err(e) => {
-            eprintln!("ctrace · claude transcript tailer failed to start: {e}");
+            eprintln!("tracce · claude transcript tailer failed to start: {e}");
             None
         }
     };
@@ -351,7 +351,7 @@ fn start_eslogger_thread(
         {
             Ok(c) => c,
             Err(e) => {
-                eprintln!("ctrace · CRITICAL: failed to spawn sudo eslogger: {e}");
+                eprintln!("tracce · CRITICAL: failed to spawn sudo eslogger: {e}");
                 let _ = ready_tx.send(EsloggerSignal::Exited);
                 return;
             }
@@ -361,7 +361,7 @@ fn start_eslogger_thread(
             thread::spawn(move || {
                 let reader = BufReader::new(stderr);
                 for line in reader.lines().flatten() {
-                    eprintln!("ctrace · eslogger stderr: {line}");
+                    eprintln!("tracce · eslogger stderr: {line}");
                 }
             });
         }
@@ -393,7 +393,7 @@ fn start_eslogger_thread(
                 Err(e) => {
                     let n = parse_errors.fetch_add(1, Ordering::Relaxed) + 1;
                     if n == 1 || n % 100 == 0 {
-                        eprintln!("ctrace · eslogger parse error (#{n}): {e}");
+                        eprintln!("tracce · eslogger parse error (#{n}): {e}");
                     }
                 }
             }
@@ -408,7 +408,7 @@ fn start_eslogger_thread(
 
         if event_count.load(Ordering::Relaxed) == 0 {
             eprintln!(
-                "ctrace · WARNING: no eslogger events recorded; \
+                "tracce · WARNING: no eslogger events recorded; \
                 check Full Disk Access for your terminal app"
             );
         }
