@@ -1,15 +1,8 @@
-```text
-████████╗██████╗  █████╗  ██████╗ ██████╗███████╗
-╚══██╔══╝██╔══██╗██╔══██╗██╔════╝██╔════╝██╔════╝
-   ██║   ██████╔╝███████║██║     ██║     █████╗
-   ██║   ██╔══██╗██╔══██║██║     ██║     ██╔══╝
-   ██║   ██║  ██║██║  ██║╚██████╗╚██████╗███████╗
-   ╚═╝   ╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝ ╚═════╝╚══════╝
-```
-
 <div align="center">
 
-### See exactly what Claude Code does on your machine
+### `tracce` - See exactly what Claude Code does on your machine
+<img width="1624" height="1061" alt="image" src="https://github.com/user-attachments/assets/747303a2-9927-418b-aa63-98db200f5cd1" />
+<img width="1624" height="1061" alt="image" src="https://github.com/user-attachments/assets/3d194072-2048-467a-aa7f-87c53f5f0abf" />
 
 A macOS kernel-event tracer for Claude Code sessions — every process, file, and
 network connection, live in your terminal or replayed later.
