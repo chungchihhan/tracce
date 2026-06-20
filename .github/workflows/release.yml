@@ -29,14 +29,41 @@ jobs:
         with:
           generate_release_notes: true
 
+      # Bump the tap formula directly. We previously used
+      # mislav/bump-homebrew-formula-action, but it failed with an opaque
+      # "unexpected HTTP 303 response" from inside the action, so we do the
+      # equivalent work in plain shell where every step is visible: download the
+      # source tarball, compute its sha256, rewrite url + sha256 in the tap's
+      # Formula/tracce.rb, and push. This mirrors scripts/cut-release.sh.
       - name: Bump Homebrew tap formula
-        uses: mislav/bump-homebrew-formula-action@v3
-        with:
-          formula-name: tracce
-          homebrew-tap: chungchihhan/homebrew-tap
-          # download-url defaults to this repo's source tarball for the pushed
-          # tag, which is exactly what the build-from-source formula needs.
         env:
           # PAT with write access to chungchihhan/homebrew-tap. The default
           # GITHUB_TOKEN can't push to another repo, so this must be a secret.
           COMMITTER_TOKEN: ${{ secrets.COMMITTER_TOKEN }}
+          TAP: chungchihhan/homebrew-tap
+          SRC_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          url="https://github.com/${SRC_REPO}/archive/refs/tags/${TAG}.tar.gz"
+          echo "Computing sha256 for $url"
+          sha="$(curl -fsSL "$url" | shasum -a 256 | awk '{print $1}')"
+          echo "sha256 = $sha"
+
+          git clone --depth 1 "https://x-access-token:${COMMITTER_TOKEN}@github.com/${TAP}.git" tap
+          formula="tap/Formula/tracce.rb"
+          test -f "$formula" || { echo "::error::$formula not found in $TAP"; exit 1; }
+
+          sed -i -E "s|^  url \".*\"|  url \"$url\"|" "$formula"
+          sed -i -E "s|^  sha256 \".*\"|  sha256 \"$sha\"|" "$formula"
+          echo "--- updated formula ---"; grep -E '^  (url|sha256) ' "$formula"
+
+          cd tap
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet; then
+            echo "Formula already up to date; nothing to commit."
+          else
+            git commit -am "tracce ${TAG}"
+            git push origin HEAD
+          fi
