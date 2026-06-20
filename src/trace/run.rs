@@ -1,6 +1,8 @@
 use crate::event::{Event, EventData, EventKind, ProcessRef};
 use crate::trace::{
-    aggregator::Aggregator, claude_transcript, eslogger, network, persist::Persist,
+    aggregator::Aggregator,
+    claude_transcript, eslogger, network,
+    persist::Persist,
     pid_tree::{self, PidTree},
     session::{Session, SessionStatus},
 };
@@ -24,6 +26,13 @@ const TREE_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const ESLOGGER_READY_TIMEOUT: Duration = Duration::from_secs(8);
 /// Longer window when a sudo password prompt is expected first.
 const ESLOGGER_READY_TIMEOUT_PROMPT: Duration = Duration::from_secs(60);
+/// The exact kernel event types eslogger subscribes to. This is the single
+/// source of truth shared by the spawn (`start_eslogger_thread`) and the
+/// transparency banner (`bring_up_eslogger`) so the banner can never claim a
+/// different command than the one we actually run as root.
+const ESLOGGER_EVENTS: &[&str] = &[
+    "exec", "fork", "exit", "open", "close", "create", "write", "unlink", "rename",
+];
 
 /// Launch a command, record it, and exit when it does. No TUI — the wrapped
 /// command owns the terminal (this is the `ctrace` / `ctrace claude` / `ctrace
@@ -51,7 +60,9 @@ pub fn run(argv: Vec<String>, root: PathBuf) -> Result<i32> {
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
 
-    let mut child = cmd.spawn().with_context(|| format!("spawn {:?}", argv[0]))?;
+    let mut child = cmd
+        .spawn()
+        .with_context(|| format!("spawn {:?}", argv[0]))?;
     let child_pid = child.id();
 
     let session = Session::create(&root, child_pid, tracer_pid, &argv, &cwd)?;
@@ -72,7 +83,12 @@ pub fn run(argv: Vec<String>, root: PathBuf) -> Result<i32> {
     let status = child.wait()?;
     let exit_code = status.code().unwrap_or(-1);
 
-    shutdown_sources(eslogger_handle, net_handle, tree_poll_handle, transcript_handle);
+    shutdown_sources(
+        eslogger_handle,
+        net_handle,
+        tree_poll_handle,
+        transcript_handle,
+    );
     drop(raw_tx);
     aggregator_handle.join().ok();
     persist_handle.join().ok();
@@ -105,7 +121,15 @@ pub(crate) fn bring_up_eslogger(raw_tx: SyncSender<Event>) -> (Option<ThreadStop
         .map(|s| s.success())
         .unwrap_or(false);
     if !sudo_cached {
-        eprintln!("ctrace · sudo will prompt for your password to run eslogger…");
+        eprintln!("ctrace · eslogger needs root to read kernel events. About to run as root:");
+        eprintln!(
+            "         sudo /usr/bin/eslogger {}",
+            ESLOGGER_EVENTS.join(" ")
+        );
+        eprintln!(
+            "         Apple's own tool, read-only. ctrace itself never runs as root. Decline → poll-only."
+        );
+        eprintln!("ctrace · sudo will prompt for your password now…");
     }
 
     let (ready_tx, ready_rx) = mpsc::channel::<EsloggerSignal>();
@@ -196,20 +220,26 @@ pub(crate) fn start_poll_sources(
     let net_handle = start_network_thread(root_pid, agg.clone(), raw_tx.clone())?;
 
     let tree_poll_handle = if !eslogger_active {
-        Some(start_tree_poll_thread(root_pid, agg.clone(), raw_tx.clone())?)
+        Some(start_tree_poll_thread(
+            root_pid,
+            agg.clone(),
+            raw_tx.clone(),
+        )?)
     } else {
         None
     };
 
-    let transcript_handle =
-        match claude_transcript::start_transcript_thread(root_pid, cwd.to_path_buf(), raw_tx.clone())
-        {
-            Ok(h) => Some(h),
-            Err(e) => {
-                eprintln!("ctrace · claude transcript tailer failed to start: {e}");
-                None
-            }
-        };
+    let transcript_handle = match claude_transcript::start_transcript_thread(
+        root_pid,
+        cwd.to_path_buf(),
+        raw_tx.clone(),
+    ) {
+        Ok(h) => Some(h),
+        Err(e) => {
+            eprintln!("ctrace · claude transcript tailer failed to start: {e}");
+            None
+        }
+    };
 
     Ok((net_handle, tree_poll_handle, transcript_handle))
 }
@@ -288,7 +318,10 @@ pub struct ThreadStop {
 
 impl ThreadStop {
     pub(crate) fn new(flag: Arc<AtomicBool>, join: thread::JoinHandle<()>) -> Self {
-        Self { flag, join: Some(join) }
+        Self {
+            flag,
+            join: Some(join),
+        }
     }
 
     pub(crate) fn shutdown(mut self) {
@@ -309,7 +342,8 @@ fn start_eslogger_thread(
         // Run eslogger via sudo so it lands in a different audit session from the
         // wrapped child process.  stdin is inherited so sudo can prompt for a password.
         let mut child = match Command::new("/usr/bin/sudo")
-            .args(["/usr/bin/eslogger", "exec", "fork", "exit", "open", "close", "create", "write", "unlink", "rename"])
+            .arg("/usr/bin/eslogger")
+            .args(ESLOGGER_EVENTS)
             .stdin(Stdio::inherit())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
