@@ -990,7 +990,7 @@ impl App {
                 ))
             }).collect();
         let focused = self.focus == Some(Pane::Process);
-        render_rows(f, body, items, &mut self.list_state[pane_index(Pane::Process)], focused);
+        render_rows(f, body, items, &mut self.list_state[pane_index(Pane::Process)], focused, true);
     }
 
     fn draw_files(&mut self, f: &mut Frame, area: Rect) {
@@ -1012,7 +1012,7 @@ impl App {
                 ]))
             }).collect();
         let focused = self.focus == Some(Pane::File);
-        render_rows(f, body, items, &mut self.list_state[pane_index(Pane::File)], focused);
+        render_rows(f, body, items, &mut self.list_state[pane_index(Pane::File)], focused, false);
     }
 
     fn draw_commands(&mut self, f: &mut Frame, area: Rect) {
@@ -1026,7 +1026,7 @@ impl App {
             )))
             .collect();
         let focused = self.focus == Some(Pane::Commands);
-        render_rows(f, body, items, &mut self.list_state[pane_index(Pane::Commands)], focused);
+        render_rows(f, body, items, &mut self.list_state[pane_index(Pane::Commands)], focused, false);
     }
 
     fn draw_network(&mut self, f: &mut Frame, area: Rect) {
@@ -1043,7 +1043,7 @@ impl App {
             )))
             .collect();
         let focused = self.focus == Some(Pane::Network);
-        render_rows(f, body, items, &mut self.list_state[pane_index(Pane::Network)], focused);
+        render_rows(f, body, items, &mut self.list_state[pane_index(Pane::Network)], focused, false);
     }
 
     /// Render the rounded outer block + the column-header row for a focusable
@@ -1260,12 +1260,21 @@ fn framed_chrome(f: &mut Frame, area: Rect, title: Line, focused: bool, header: 
 }
 
 /// Render a pane's rows into `area` with the shared selection highlight. In
-/// follow mode (`selected == None`) the viewport is pinned to the top so the
-/// newest rows stay in view; in browse mode `ListState` scrolls to the
-/// highlighted row.
-fn render_rows(f: &mut Frame, area: Rect, items: Vec<ListItem>, state: &mut ListState, focused: bool) {
+/// follow mode (`selected == None`) the viewport is pinned to the newest rows;
+/// in browse mode `ListState` scrolls to the highlighted row.
+///
+/// `follow_bottom` picks which end is "newest": most panes insert the newest row
+/// at the front, so following pins to the top (offset 0). The process tree is
+/// pid-sorted (root at the top, newest spawns at the bottom), so it follows the
+/// bottom instead — otherwise new processes fall below the fold and the pane
+/// looks frozen once the tree outgrows its height.
+fn render_rows(f: &mut Frame, area: Rect, items: Vec<ListItem>, state: &mut ListState, focused: bool, follow_bottom: bool) {
     if state.selected().is_none() {
-        *state.offset_mut() = 0;
+        *state.offset_mut() = if follow_bottom {
+            items.len().saturating_sub(area.height as usize)
+        } else {
+            0
+        };
     }
     // The focused pane gets the bright cyan selection bar; a pane that retains a
     // selection after focus moves away gets a muted grey bar instead, so it's
@@ -1556,6 +1565,33 @@ mod tests {
     fn default_focus_is_follow_all() {
         let app = test_app();
         assert_eq!(app.focus, None);
+    }
+
+    #[test]
+    fn process_tree_follows_newest_at_bottom() {
+        // A wide tree (root pid 1, children 2..=30) far taller than the pane.
+        // The tree is pid-sorted, so the newest process is the last row. In
+        // follow mode the pane must scroll to keep it in view, not pin the root.
+        let mut app = test_app();
+        for pid in 1u32..=30 {
+            app.processes.insert(pid, ProcInfo {
+                pid,
+                comm: format!("C{pid:02}X"),
+                ppid: if pid == 1 { 0 } else { 1 },
+                event_count: 0,
+                last_ts_ns: 0,
+            });
+        }
+        assert!(app.focus.is_none(), "test relies on follow-all (no selection)");
+
+        let backend = ratatui::backend::TestBackend::new(40, 10);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        term.draw(|f| app.draw_processes(f, f.area())).unwrap();
+        let text: String = term.backend().buffer().content()
+            .iter().map(|c| c.symbol()).collect();
+
+        assert!(text.contains("C30X"), "newest process (bottom of tree) must be visible");
+        assert!(!text.contains("C01X"), "root must scroll out of view when following the newest");
     }
 
     #[test]
