@@ -38,6 +38,28 @@ fn main() -> std::process::ExitCode {
             }
         },
 
+        Some(Cmd::Export { target, output, latest }) => {
+            match export_session(target, output, latest, &root) {
+                Ok(()) => std::process::ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("tracce: {e:#}");
+                    std::process::ExitCode::from(1)
+                }
+            }
+        }
+
+        Some(Cmd::Import { file, force }) => match tracce::bundle::import(&file, &root, force) {
+            Ok(id) => {
+                println!("imported session {id}");
+                println!("replay with: tracce view {id}");
+                std::process::ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("tracce: {e:#}");
+                std::process::ExitCode::from(1)
+            }
+        },
+
         Some(Cmd::FixPerms { session }) => match tracce::fix_perms::run(&root, session) {
             Ok(()) => std::process::ExitCode::SUCCESS,
             Err(e) => {
@@ -46,6 +68,21 @@ fn main() -> std::process::ExitCode {
             }
         },
     }
+}
+
+/// Resolve a session and export it; default output is ./<id>.tracce.tgz.
+fn export_session(
+    target: Option<String>,
+    output: Option<std::path::PathBuf>,
+    latest: bool,
+    root: &std::path::Path,
+) -> anyhow::Result<()> {
+    let entry = tracce::view::run::resolve_entry(target, latest, root)?;
+    let out = output
+        .unwrap_or_else(|| std::path::PathBuf::from(format!("{}.tracce.tgz", entry.meta.session_id)));
+    let n = tracce::bundle::export(&entry, &out)?;
+    println!("exported {} ({} bytes) -> {}", entry.meta.session_id, n, out.display());
+    Ok(())
 }
 
 /// `tracce` / `tracce claude …` → trace `claude` with the given forwarded args.

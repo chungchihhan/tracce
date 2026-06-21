@@ -10,9 +10,23 @@ fn help_lists_the_core_subcommands() {
     assert!(out.status.success(), "--help should succeed");
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("Usage:"), "help should contain Usage:, got:\n{stdout}");
-    for sub in ["claude", "attach", "exec", "view", "list"] {
+    for sub in ["claude", "attach", "exec", "view", "list", "export", "import"] {
         assert!(stdout.contains(sub), "help should mention `{sub}`, got:\n{stdout}");
     }
+}
+
+#[test]
+fn export_help_documents_output_flag() {
+    let out = bin().args(["export", "--help"]).output().unwrap();
+    assert!(out.status.success());
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains("--output") || s.contains("-o"), "export help should mention output, got:\n{s}");
+}
+
+#[test]
+fn import_requires_a_file_arg() {
+    let out = bin().arg("import").output().unwrap();
+    assert!(!out.status.success(), "import with no file should error");
 }
 
 #[test]
