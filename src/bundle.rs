@@ -52,19 +52,23 @@ pub fn export(entry: &SessionEntry, out: &Path) -> Result<u64> {
         header.set_gid(0);
         header.set_mtime(0);
         header.set_entry_type(tar::EntryType::Regular);
-        header.set_cksum();
+        // `append_data` rewrites the path field and recomputes the checksum
+        // itself, so no manual `set_cksum()` is needed (or correct) here.
         tar.append_data(&mut header, name, data.as_slice())
             .with_context(|| format!("append {name} to archive"))?;
     }
 
     let gz = tar.into_inner().context("finish tar")?;
     let mut file = gz.finish().context("finish gzip")?;
-    file.flush().ok();
+    // Propagate flush/sync errors rather than swallowing them — a partial write
+    // on a full or networked disk must not be reported as a successful export.
+    file.flush().context("flush archive")?;
+    file.sync_all().context("sync archive")?;
     let n = file
         .metadata()
         .map(|m| m.len())
         .or_else(|_| std::fs::metadata(out).map(|m| m.len()))
-        .unwrap_or(0);
+        .context("stat written archive")?;
     if n == 0 {
         bail!("export produced an empty archive");
     }
