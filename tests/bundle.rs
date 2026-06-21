@@ -184,6 +184,58 @@ fn import_refuses_to_clobber_without_force() {
 }
 
 #[test]
+fn import_rejects_duplicate_entry() {
+    // A second meta.json (with a different id) must not silently redirect the
+    // destination — the import must be rejected outright.
+    let root = TempDir::new().unwrap();
+    let out = root.path().join("dup.tgz");
+    make_targz(
+        &out,
+        &[
+            ("events.jsonl", b"{}\n"),
+            ("meta.json", good_meta("2026-05-28T22-04-31_first_1").as_bytes()),
+            ("status", b"done\n"),
+            ("meta.json", good_meta("2026-05-28T22-04-31_second_2").as_bytes()),
+        ],
+    );
+    let dst = TempDir::new().unwrap();
+    let err = tracce::bundle::import(&out, dst.path(), false);
+    assert!(err.is_err(), "duplicate entry must be rejected");
+    // Neither id should have been created.
+    assert!(!dst
+        .path()
+        .join("sessions")
+        .join("2026-05-28T22-04-31_second_2")
+        .exists());
+    assert!(!dst
+        .path()
+        .join("sessions")
+        .join("2026-05-28T22-04-31_first_1")
+        .exists());
+}
+
+#[test]
+fn import_accepts_entry_exactly_at_cap() {
+    // status cap is 64 KiB; an entry of exactly that size must be accepted.
+    let root = TempDir::new().unwrap();
+    let out = root.path().join("atcap.tgz");
+    let exact = vec![b'd'; 64 * 1024];
+    make_targz(
+        &out,
+        &[
+            ("events.jsonl", b"{}\n"),
+            ("meta.json", good_meta("2026-05-28T22-04-31_cap_1").as_bytes()),
+            ("status", &exact),
+        ],
+    );
+    let dst = TempDir::new().unwrap();
+    assert_eq!(
+        tracce::bundle::import(&out, dst.path(), false).unwrap(),
+        "2026-05-28T22-04-31_cap_1"
+    );
+}
+
+#[test]
 fn import_accepts_pre_rename_ctrace_version() {
     let root = TempDir::new().unwrap();
     let out = root.path().join("old.tgz");
