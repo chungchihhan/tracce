@@ -1155,8 +1155,9 @@ impl App {
     }
 
     fn draw_quit(&self, f: &mut Frame, area: Rect) {
-        let rect = centered_fixed(58, 16, area);
-        let block = modal_block(" Quit tracce? ");
+        let rect = centered_fixed(64, 20, area);
+        // Roomier padding than the shared modal helper for a calmer quit prompt.
+        let block = modal_block(" Quit tracce? ").padding(Padding::new(4, 4, 2, 2));
         let inner = block.inner(rect);
         f.render_widget(Clear, rect);
         f.render_widget(block, rect);
