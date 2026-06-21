@@ -1155,15 +1155,18 @@ impl App {
     }
 
     fn draw_quit(&self, f: &mut Frame, area: Rect) {
-        let rect = centered_fixed(64, 20, area);
+        let rect = centered_fixed(64, 22, area);
         // Roomier padding than the shared modal helper for a calmer quit prompt.
         let block = modal_block(" Quit tracce? ").padding(Padding::new(4, 4, 2, 2));
         let inner = block.inner(rect);
         f.render_widget(Clear, rect);
         f.render_widget(block, rect);
 
-        let mut lines = logo_lines();
+        // Extra blank lines above and below the logo give it room to breathe.
+        let mut lines = vec![Line::raw(""), Line::raw("")];
+        lines.extend(logo_lines());
         lines.extend([
+            Line::raw(""),
             Line::raw(""),
             Line::from(Span::raw("Stop watching this session?")).alignment(Alignment::Center),
             Line::raw(""),
