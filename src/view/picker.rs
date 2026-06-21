@@ -27,11 +27,15 @@ pub fn pick(entries: Vec<SessionEntry>) -> Result<Option<SessionEntry>> {
     let mut state = ListState::default();
     state.select(Some(0));
     let mut picked: Option<usize> = None;
+    // Result of the most recent `e` export, shown in the footer until the next key.
+    let mut flash: Option<String> = None;
 
     loop {
-        term.draw(|f| draw(f, &entries, &counts, &mut state))?;
+        term.draw(|f| draw(f, &entries, &counts, &mut state, flash.as_deref()))?;
         if let CtEvent::Key(k) = event::read()? {
             let cur = state.selected().unwrap_or(0);
+            // Any keypress clears a stale export flash before handling.
+            flash = None;
             match k.code {
                 KeyCode::Char('q') | KeyCode::Esc => break,
                 KeyCode::Down | KeyCode::Char('j') => state.select(Some((cur + 1).min(n - 1))),
@@ -40,6 +44,16 @@ pub fn pick(entries: Vec<SessionEntry>) -> Result<Option<SessionEntry>> {
                 KeyCode::PageUp => state.select(Some(cur.saturating_sub(10))),
                 KeyCode::Home | KeyCode::Char('g') => state.select(Some(0)),
                 KeyCode::End | KeyCode::Char('G') => state.select(Some(n - 1)),
+                KeyCode::Char('e') => {
+                    let entry = &entries[cur];
+                    let out = std::path::PathBuf::from(
+                        format!("{}.tracce.tgz", entry.meta.session_id),
+                    );
+                    flash = Some(match crate::bundle::export(entry, &out) {
+                        Ok(n) => format!("exported -> {} ({} bytes)", out.display(), n),
+                        Err(e) => format!("export failed: {e:#}"),
+                    });
+                }
                 KeyCode::Enter => { picked = state.selected(); break; }
                 _ => {}
             }
@@ -49,7 +63,7 @@ pub fn pick(entries: Vec<SessionEntry>) -> Result<Option<SessionEntry>> {
     Ok(picked.map(|i| entries[i].clone()))
 }
 
-fn draw(f: &mut Frame, entries: &[SessionEntry], counts: &[usize], state: &mut ListState) {
+fn draw(f: &mut Frame, entries: &[SessionEntry], counts: &[usize], state: &mut ListState, flash: Option<&str>) {
     let area = f.area();
 
     // Outer frame: rounded cyan border, matching the dashboard chrome.
@@ -192,12 +206,17 @@ fn draw(f: &mut Frame, entries: &[SessionEntry], counts: &[usize], state: &mut L
         f.render_widget(Paragraph::new(lines), dinner);
     }
 
-    // Footer key hints (centered across the frame).
-    let footer = Line::from(vec![
-        key_cap("↑/↓"), Span::styled(" move   ", gray()),
-        key_cap("Enter"), Span::styled(" open   ", gray()),
-        key_cap("q"), Span::styled(" cancel", gray()),
-    ]);
+    // Footer: the latest export result if any, else the centered key hints.
+    let footer = if let Some(msg) = flash {
+        Line::from(Span::styled(msg.to_string(), Style::default().fg(Color::Cyan)))
+    } else {
+        Line::from(vec![
+            key_cap("↑/↓"), Span::styled(" move   ", gray()),
+            key_cap("Enter"), Span::styled(" open   ", gray()),
+            key_cap("e"), Span::styled(" export   ", gray()),
+            key_cap("q"), Span::styled(" cancel", gray()),
+        ])
+    };
     f.render_widget(Paragraph::new(footer).alignment(Alignment::Center), footer_rect);
 }
 
