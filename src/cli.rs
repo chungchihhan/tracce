@@ -53,6 +53,25 @@ pub enum Cmd {
     },
     /// List sessions as a plain text table.
     List,
+    /// Export a recorded session to a single shareable `.tracce.tgz` archive.
+    Export {
+        /// Session id or id-prefix. Omit to use the picker (or the only/live session).
+        target: Option<String>,
+        /// Output path. Default: ./<session-id>.tracce.tgz
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        /// Export the most recently started session without showing a picker.
+        #[arg(long)]
+        latest: bool,
+    },
+    /// Import a `.tracce.tgz` archive into your sessions, ready to `view`.
+    Import {
+        /// Path to a `.tracce.tgz` produced by `tracce export`.
+        file: PathBuf,
+        /// Overwrite an existing session with the same id.
+        #[arg(long)]
+        force: bool,
+    },
     /// Reset ownership of session files left root-owned by a crashed trace.
     FixPerms {
         /// Specific session id to fix; omit to fix all.

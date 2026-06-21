@@ -174,19 +174,21 @@ pub fn import(archive: &Path, root: &Path, force: bool) -> Result<String> {
         std::fs::create_dir_all(parent)?;
     }
 
-    // Atomic move into place: rename the whole staging dir. `into_path` keeps it
-    // from being deleted on drop.
-    let staged_path = staging.into_path();
-    std::fs::rename(&staged_path, &dest_dir).or_else(|_| {
-        // Cross-device or non-empty: fall back to a fresh dir + per-file move.
-        std::fs::create_dir_all(&dest_dir)?;
-        for name in SESSION_FILES {
-            std::fs::rename(staged_path.join(name), dest_dir.join(name))
-                .or_else(|_| std::fs::copy(staged_path.join(name), dest_dir.join(name)).map(|_| ()))?;
+    // Move the validated files into place. `staging` (a TempDir guard) stays
+    // alive and cleans up the now-empty staging dir when it drops at the end of
+    // the function — so we move per file rather than consuming the guard, which
+    // avoids depending on TempDir::keep / the deprecated into_path across the
+    // version range the MSRV-pinned lockfile may resolve.
+    std::fs::create_dir_all(&dest_dir)
+        .with_context(|| format!("create {}", dest_dir.display()))?;
+    for name in SESSION_FILES {
+        let from = staging.path().join(name);
+        let to = dest_dir.join(name);
+        // rename is atomic within a filesystem; fall back to copy across devices.
+        if std::fs::rename(&from, &to).is_err() {
+            std::fs::copy(&from, &to).with_context(|| format!("install {name}"))?;
         }
-        let _ = std::fs::remove_dir_all(&staged_path);
-        Ok::<(), anyhow::Error>(())
-    })?;
+    }
 
     Ok(meta.session_id)
 }
