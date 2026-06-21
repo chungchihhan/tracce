@@ -192,35 +192,28 @@ pub fn import(archive: &Path, root: &Path, force: bool) -> Result<String> {
         .prefix(".incoming-")
         .tempdir_in(&sessions_dir)
         .context("create destination staging dir")?;
+    // `staging` and `assembled` are both temp dirs under `root`, so they share a
+    // filesystem and rename is a plain atomic move — no cross-device copy path.
     for name in SESSION_FILES {
         let from = staging.path().join(name);
         let to = assembled.path().join(name);
-        // rename is atomic within a filesystem; fall back to copy across devices.
-        if std::fs::rename(&from, &to).is_err() {
-            std::fs::copy(&from, &to).with_context(|| format!("install {name}"))?;
-        }
+        std::fs::rename(&from, &to).with_context(|| format!("stage {name}"))?;
     }
 
-    // Atomic swap. On most platforms rename onto an existing dir fails, so a
-    // forced overwrite removes the old session first; the window between remove
-    // and rename is unavoidable without renameat2, but the new dir is fully
-    // assembled, so a crash there loses only the old copy, never leaves a
-    // partial one.
+    // Atomic swap. `assembled` is a sibling of `dest_dir` inside `sessions/`, so
+    // this rename is same-filesystem and atomic — the destination is only ever
+    // the complete session or absent, never half-populated. A forced overwrite
+    // removes the old session first (rename onto a non-empty dir fails on most
+    // platforms); the remove→rename window is unavoidable without renameat2, but
+    // since the replacement is already fully assembled, a crash in that window
+    // loses only the old copy and never leaves a partial one.
     if dest_dir.exists() {
         std::fs::remove_dir_all(&dest_dir)
             .with_context(|| format!("remove existing {}", dest_dir.display()))?;
     }
     let assembled_path = assembled.path().to_path_buf();
-    std::fs::rename(&assembled_path, &dest_dir).or_else(|_| {
-        // Cross-device (shouldn't happen — same sessions dir) or other rename
-        // failure: copy the assembled dir over, then let the guard clean up.
-        std::fs::create_dir_all(&dest_dir)?;
-        for name in SESSION_FILES {
-            std::fs::copy(assembled_path.join(name), dest_dir.join(name))
-                .with_context(|| format!("install {name}"))?;
-        }
-        Ok::<(), anyhow::Error>(())
-    })?;
+    std::fs::rename(&assembled_path, &dest_dir)
+        .with_context(|| format!("install session into {}", dest_dir.display()))?;
 
     Ok(meta.session_id)
 }

@@ -1155,6 +1155,7 @@ impl App {
             help_group("Display"),
             help_kv("p", "pause / resume"),
             help_kv("/", "filter focused pane"),
+            help_kv("e", "export this session to ./<id>.tracce.tgz"),
             Line::raw(""),
             help_group("Activity glyphs"),
             help_legend("R read  W write  C create  X close  D delete"),
