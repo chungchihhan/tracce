@@ -1,3 +1,4 @@
+pub mod bundle;
 pub mod event;
 pub mod fix_perms;
 pub mod hosts;
