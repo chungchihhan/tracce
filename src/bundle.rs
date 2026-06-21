@@ -134,13 +134,23 @@ pub fn import(archive: &Path, root: &Path, force: bool) -> Result<String> {
             let path = entry.path().context("entry path")?;
             safe_entry_name(&path)?
         };
+        // Reject duplicate entries: a second occurrence of an allowlisted name
+        // would otherwise silently overwrite the first in staging, letting a
+        // crafted archive swap in a different meta.json (and thus a different
+        // destination id) than the one that passed earlier checks.
+        if seen.iter().any(|s| s == &name) {
+            bail!("archive contains a duplicate `{name}` entry");
+        }
         let cap = cap_for(&name);
         let dest = staging.path().join(&name);
         let mut out = File::create(&dest).with_context(|| format!("write {name}"))?;
-        let mut limited = entry.by_ref().take(cap + 1);
-        let written =
-            std::io::copy(&mut limited, &mut out).with_context(|| format!("extract {name}"))?;
-        if written > cap {
+        // Cap at exactly `cap` bytes copied; if the entry still has unread bytes
+        // afterwards it exceeded the cap. This bounds the bytes written to disk
+        // to `cap` (not `cap + 1`) before rejecting.
+        let mut limited = entry.by_ref().take(cap);
+        std::io::copy(&mut limited, &mut out).with_context(|| format!("extract {name}"))?;
+        // One more byte readable past the cap ⇒ over the limit.
+        if entry.read(&mut [0u8; 1]).unwrap_or(0) > 0 {
             bail!("entry `{name}` exceeds the {cap}-byte limit");
         }
         seen.push(name);
@@ -159,36 +169,54 @@ pub fn import(archive: &Path, root: &Path, force: bool) -> Result<String> {
         serde_json::from_slice(&meta_bytes).context("meta.json is not a valid tracce session")?;
     validate_session_id(&meta.session_id)?;
 
-    let dest_dir: PathBuf = root.join("sessions").join(&meta.session_id);
-    if dest_dir.exists() {
-        if !force {
-            bail!(
-                "session `{}` already exists (use --force to overwrite)",
-                meta.session_id
-            );
-        }
-        std::fs::remove_dir_all(&dest_dir)
-            .with_context(|| format!("remove existing {}", dest_dir.display()))?;
+    let sessions_dir = root.join("sessions");
+    let dest_dir: PathBuf = sessions_dir.join(&meta.session_id);
+    if dest_dir.exists() && !force {
+        bail!(
+            "session `{}` already exists (use --force to overwrite)",
+            meta.session_id
+        );
     }
-    if let Some(parent) = dest_dir.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
+    std::fs::create_dir_all(&sessions_dir)
+        .with_context(|| format!("create {}", sessions_dir.display()))?;
 
-    // Move the validated files into place. `staging` (a TempDir guard) stays
-    // alive and cleans up the now-empty staging dir when it drops at the end of
-    // the function — so we move per file rather than consuming the guard, which
-    // avoids depending on TempDir::keep / the deprecated into_path across the
-    // version range the MSRV-pinned lockfile may resolve.
-    std::fs::create_dir_all(&dest_dir)
-        .with_context(|| format!("create {}", dest_dir.display()))?;
+    // Build the finished session in a second staging dir on the destination
+    // filesystem, then swap it into place with a single rename so `dest_dir` is
+    // only ever the complete session or absent — never half-populated. The
+    // TempDir guards clean themselves up if we bail before the swap.
+    let assembled = tempfile::Builder::new()
+        .prefix(".incoming-")
+        .tempdir_in(&sessions_dir)
+        .context("create destination staging dir")?;
     for name in SESSION_FILES {
         let from = staging.path().join(name);
-        let to = dest_dir.join(name);
+        let to = assembled.path().join(name);
         // rename is atomic within a filesystem; fall back to copy across devices.
         if std::fs::rename(&from, &to).is_err() {
             std::fs::copy(&from, &to).with_context(|| format!("install {name}"))?;
         }
     }
+
+    // Atomic swap. On most platforms rename onto an existing dir fails, so a
+    // forced overwrite removes the old session first; the window between remove
+    // and rename is unavoidable without renameat2, but the new dir is fully
+    // assembled, so a crash there loses only the old copy, never leaves a
+    // partial one.
+    if dest_dir.exists() {
+        std::fs::remove_dir_all(&dest_dir)
+            .with_context(|| format!("remove existing {}", dest_dir.display()))?;
+    }
+    let assembled_path = assembled.path().to_path_buf();
+    std::fs::rename(&assembled_path, &dest_dir).or_else(|_| {
+        // Cross-device (shouldn't happen — same sessions dir) or other rename
+        // failure: copy the assembled dir over, then let the guard clean up.
+        std::fs::create_dir_all(&dest_dir)?;
+        for name in SESSION_FILES {
+            std::fs::copy(assembled_path.join(name), dest_dir.join(name))
+                .with_context(|| format!("install {name}"))?;
+        }
+        Ok::<(), anyhow::Error>(())
+    })?;
 
     Ok(meta.session_id)
 }
