@@ -1903,19 +1903,40 @@ mod tests {
 
         let mut app = App::new(entry);
         // Export writes the default ./<id>.tracce.tgz into cwd; point cwd at tmp
-        // so the artifact lands there and is cleaned up with the TempDir.
-        let prev = std::env::current_dir().unwrap();
-        std::env::set_current_dir(tmp.path()).unwrap();
-        app.handle_key(key('e'));
-        std::env::set_current_dir(prev).unwrap();
+        // so the artifact lands there and is cleaned up with the TempDir. cwd is
+        // process-global and tests run in parallel, so a CwdGuard restores it
+        // even if the assertions below panic, and a mutex serializes the swap.
+        {
+            let _lock = CWD_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+            let _cwd = CwdGuard::enter(tmp.path());
+            app.handle_key(key('e'));
 
-        assert_eq!(app.mode, Mode::ExportFlash);
-        let msg = app.flash.clone().expect("flash message set");
-        assert!(msg.contains("exported"), "got: {msg}");
-        assert!(tmp.path().join(format!("{id}.tracce.tgz")).exists());
+            assert_eq!(app.mode, Mode::ExportFlash);
+            let msg = app.flash.clone().expect("flash message set");
+            assert!(msg.contains("exported"), "got: {msg}");
+            assert!(tmp.path().join(format!("{id}.tracce.tgz")).exists());
+        }
         // Any key dismisses.
         app.handle_key(code(KeyCode::Esc));
         assert_eq!(app.mode, Mode::Normal);
         assert!(app.flash.is_none());
+    }
+
+    /// Serializes the process-global cwd swap across parallel tests.
+    static CWD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Restores the previous working directory on drop, even on panic.
+    struct CwdGuard(PathBuf);
+    impl CwdGuard {
+        fn enter(dir: &std::path::Path) -> Self {
+            let prev = std::env::current_dir().unwrap();
+            std::env::set_current_dir(dir).unwrap();
+            CwdGuard(prev)
+        }
+    }
+    impl Drop for CwdGuard {
+        fn drop(&mut self) {
+            let _ = std::env::set_current_dir(&self.0);
+        }
     }
 }

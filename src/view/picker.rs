@@ -32,10 +32,12 @@ pub fn pick(entries: Vec<SessionEntry>) -> Result<Option<SessionEntry>> {
 
     loop {
         term.draw(|f| draw(f, &entries, &counts, &mut state, flash.as_deref()))?;
-        if let CtEvent::Key(k) = event::read()? {
+        let ev = event::read()?;
+        // Any event (key, resize, …) dismisses a stale export flash so it never
+        // lingers on screen waiting specifically for a keypress.
+        flash = None;
+        if let CtEvent::Key(k) = ev {
             let cur = state.selected().unwrap_or(0);
-            // Any keypress clears a stale export flash before handling.
-            flash = None;
             match k.code {
                 KeyCode::Char('q') | KeyCode::Esc => break,
                 KeyCode::Down | KeyCode::Char('j') => state.select(Some((cur + 1).min(n - 1))),

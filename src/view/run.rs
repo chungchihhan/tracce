@@ -89,7 +89,17 @@ pub fn resolve_entry(target: Option<String>, latest: bool, root: &Path) -> Resul
     if let Some(t) = target {
         let matches: Vec<_> = entries.iter().filter(|e| e.meta.session_id.starts_with(&t)).cloned().collect();
         if matches.len() == 1 { return Ok(matches.into_iter().next().unwrap()); }
-        if matches.is_empty() { return Err(anyhow!("no session id matches `{t}`")); }
+        if matches.is_empty() {
+            // A file-path target is a common mistake here (e.g. `export ./meta.json`):
+            // this resolver only matches session ids, so say so rather than the
+            // bare "no session id matches".
+            if Path::new(&t).is_file() {
+                return Err(anyhow!(
+                    "`{t}` is a file, not a session id — pass a session id or id-prefix"
+                ));
+            }
+            return Err(anyhow!("no session id matches `{t}`"));
+        }
         return Err(anyhow!("`{t}` is ambiguous: {} matches", matches.len()));
     }
     if latest {
