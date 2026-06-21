@@ -44,7 +44,7 @@ const ZOOM_LEVELS: [usize; 6] = [1, 2, 5, 10, 30, 60];
 /// Which interaction mode the UI is in. Only `Normal` runs navigation keys; the
 /// others are transient overlays/input modes that capture the keyboard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Mode { Normal, Help, QuitConfirm, Filter, Detail }
+pub enum Mode { Normal, Help, QuitConfirm, Filter, Detail, ExportFlash }
 
 /// A frozen snapshot of one row's full fields, shown in the detail modal. Built
 /// at the moment Enter is pressed so live updates can't shift it under the user.
@@ -79,6 +79,8 @@ pub struct App {
     list_state: [ListState; 5],
     /// Frozen detail snapshot for `Mode::Detail`; `None` outside it.
     detail: Option<DetailView>,
+    /// Result message shown in the export flash modal; `None` outside it.
+    pub flash: Option<String>,
 
     // derived state
     pub processes: HashMap<u32, ProcInfo>,
@@ -119,6 +121,7 @@ impl App {
             filter_draft: String::new(),
             list_state: std::array::from_fn(|_| ListState::default()),
             detail: None,
+            flash: None,
             processes: HashMap::new(),
             recent_files: Vec::new(),
             commands: Vec::new(),
@@ -144,6 +147,7 @@ impl App {
             Mode::QuitConfirm => self.handle_quit_key(key),
             Mode::Filter => self.handle_filter_key(key),
             Mode::Detail => self.handle_detail_key(key),
+            Mode::ExportFlash => { self.mode = Mode::Normal; self.flash = None; } // any key dismisses
             Mode::Normal => self.handle_normal_key(key),
         }
     }
@@ -199,6 +203,8 @@ impl App {
             (KeyCode::Char('h'), _) | (KeyCode::Char('?'), _) | (KeyCode::F(1), _) => {
                 self.mode = Mode::Help;
             }
+            // `e` exports the session being viewed to ./<id>.tracce.tgz.
+            (KeyCode::Char('e'), _) => self.export_session(),
             // `/` opens filter on the focused row pane (Events isn't filterable).
             (KeyCode::Char('/'), _) => {
                 if let Some(p) = self.focus {
@@ -355,6 +361,18 @@ impl App {
         if let Some(sel) = self.list_state[i].selected() {
             self.list_state[i].select(Some((sel + 1).min(len.saturating_sub(1))));
         }
+    }
+
+    /// Export the session being viewed to ./<id>.tracce.tgz and show a flash.
+    fn export_session(&mut self) {
+        let out =
+            std::path::PathBuf::from(format!("{}.tracce.tgz", self.session.meta.session_id));
+        let msg = match crate::bundle::export(&self.session, &out) {
+            Ok(n) => format!("exported -> {} ({} bytes)", out.display(), n),
+            Err(e) => format!("export failed: {e:#}"),
+        };
+        self.flash = Some(msg);
+        self.mode = Mode::ExportFlash;
     }
 
     /// Open the detail modal for the focused pane's selected row (or the top row
@@ -680,6 +698,7 @@ impl App {
             Mode::Help => { dim_backdrop(f, area); self.draw_help(f, area); }
             Mode::QuitConfirm => { dim_backdrop(f, area); self.draw_quit(f, area); }
             Mode::Detail => { dim_backdrop(f, area); self.draw_detail(f, area); }
+            Mode::ExportFlash => { dim_backdrop(f, area); self.draw_flash(f, area); }
             _ => {}
         }
     }
@@ -1107,7 +1126,7 @@ impl App {
         let mut spans: Vec<Span> = Vec::new();
         for (k, label) in [
             ("Tab", "focus"), ("1-5", "show"), ("↵", "detail"), ("f", "follow"),
-            ("/", "filter"), ("p", "pause"), ("h", "help"), ("q", "quit"),
+            ("/", "filter"), ("p", "pause"), ("e", "export"), ("h", "help"), ("q", "quit"),
         ] {
             spans.push(Span::styled(format!(" {k} "), key_style));
             spans.push(Span::styled(format!(" {label}  "), label_style));
@@ -1181,6 +1200,25 @@ impl App {
                 Style::default().fg(Color::DarkGray),
             )).alignment(Alignment::Center),
         ]);
+        f.render_widget(Paragraph::new(lines), inner);
+    }
+
+    /// The export flash: a small centered modal showing where the bundle landed
+    /// (or why it failed). Any key dismisses it back to the dashboard.
+    fn draw_flash(&self, f: &mut Frame, area: Rect) {
+        let rect = centered_fixed(72, 9, area);
+        let block = modal_block(" export ");
+        let inner = block.inner(rect);
+        f.render_widget(Clear, rect);
+        f.render_widget(block, rect);
+        let msg = self.flash.clone().unwrap_or_default();
+        let lines = vec![
+            Line::raw(""),
+            Line::from(Span::raw(msg)).alignment(Alignment::Center),
+            Line::raw(""),
+            Line::from(Span::styled("press any key", Style::default().fg(Color::DarkGray)))
+                .alignment(Alignment::Center),
+        ];
         f.render_widget(Paragraph::new(lines), inner);
     }
 
@@ -1850,5 +1888,34 @@ mod tests {
         app.handle_key(code(KeyCode::Esc)); // cancel input
         assert_eq!(app.mode, Mode::Normal);
         assert!(app.pane_filter(Pane::Commands).is_empty());
+    }
+
+    #[test]
+    fn e_key_exports_focused_session_and_flashes() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let id = "2026-05-28T22-04-31_demo_4711";
+        let dir = tmp.path().join("sessions").join(id);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("events.jsonl"), "{}\n").unwrap();
+        std::fs::write(dir.join("status"), "done\n").unwrap();
+        std::fs::write(dir.join("meta.json"), format!(r#"{{"session_id":"{id}","started_at":"2026-05-28T22:04:31Z","ended_at":null,"cwd":"/tmp/demo","argv":["claude"],"claude_pid":1,"tracer_pid":2,"hostname":"h","macos_version":"15","tracce_version":"0.1"}}"#)).unwrap();
+        let entry = crate::view::discovery::entry_for_dir(&dir).unwrap();
+
+        let mut app = App::new(entry);
+        // Export writes the default ./<id>.tracce.tgz into cwd; point cwd at tmp
+        // so the artifact lands there and is cleaned up with the TempDir.
+        let prev = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmp.path()).unwrap();
+        app.handle_key(key('e'));
+        std::env::set_current_dir(prev).unwrap();
+
+        assert_eq!(app.mode, Mode::ExportFlash);
+        let msg = app.flash.clone().expect("flash message set");
+        assert!(msg.contains("exported"), "got: {msg}");
+        assert!(tmp.path().join(format!("{id}.tracce.tgz")).exists());
+        // Any key dismisses.
+        app.handle_key(code(KeyCode::Esc));
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(app.flash.is_none());
     }
 }
