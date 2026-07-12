@@ -107,9 +107,9 @@ tracce attach <pid>
 **Replay & inspect recordings** — every run is saved, so `view` works after the fact too:
 
 ```sh
-tracce view                            # follows the live session, else opens the picker
-tracce view --latest
-tracce view <session-id-prefix>
+tracce view                            # always opens the picker to choose a session
+tracce view --latest                   # skips the picker, opens the newest session (live or not)
+tracce view <session-id-prefix>         # skips the picker, opens that session directly
 tracce list                            # sessions as a text table
 tracce exec -- npm test                # testing hatch: trace any command
 ```
@@ -161,6 +161,7 @@ path / argv / host, untruncated, plus when it happened). On the focused EVENTS/s
 | `f` / `g` / `G` | follow latest / jump top / oldest |
 | `p` | pause |
 | `e` | export this session to `./<id>.tracce.tgz` |
+| `s` | switch session (back to the picker) |
 | `h` or `?` | help |
 | `q` / `Esc` | quit  ·  `Ctrl-C` quits immediately |
 

@@ -80,7 +80,9 @@ pub fn run(pid: Option<u32>, root: &Path) -> Result<()> {
     // Render the live session in the TUI until the user quits. claude keeps
     // running when we leave — we only detach.
     let entry = crate::view::discovery::entry_for_dir(session.dir())?;
-    let render_result = crate::view::run::run_entry(entry, true);
+    // `s` (switch session) is a no-op here: attach is tied to this one recording,
+    // so it's treated the same as quitting — just detach.
+    let render_result = crate::view::run::run_entry(entry, true).map(|_| ());
 
     // Tear everything down once the TUI exits.
     run::shutdown_sources(eslogger_handle, net_handle, tree_poll_handle, transcript_handle);
