@@ -28,6 +28,7 @@ network connection, live in your terminal or replayed later.
 - **Events/s** — a live bar graph with a real time axis you can scrub and zoom
 - **Record & replay** — every session is written to JSONL, so you can `tracce view` it later
 - **Minimal privilege** — only Apple's signed `eslogger` runs as root, with a hardcoded argument list; tracce itself never does
+- **Your own danger list** — maintain glob patterns in `~/.tracce/flags.json`; matching commands/paths get flagged yellow (warning) or red (critical)
 
 > [!NOTE]
 > Personal/audit tool, macOS only. Your terminal app needs **Full Disk Access**.
@@ -164,6 +165,25 @@ path / argv / host, untruncated, plus when it happened). On the focused EVENTS/s
 | `s` | switch session (back to the picker) |
 | `h` or `?` | help |
 | `q` / `Esc` | quit  ·  `Ctrl-C` quits immediately |
+
+### Flagging your own commands & paths
+
+Maintain your own list of glob patterns at `~/.tracce/flags.json` — any
+command (argv) or file path matching a pattern gets colored in PROCESS TREE,
+ACTIVITY, and COMMANDS: yellow for `warning`, red for `critical`. The file is
+seeded with a small default set on first run and is yours to edit freely:
+
+```json
+{
+  "critical": ["*rm -rf*", "*curl*|*sh*", "*sudo*", "*chmod 777*", "*mkfs*"],
+  "warning": ["*.env*", "*git push --force*", "*eval*", "*npm publish*"]
+}
+```
+
+Patterns are glob-style and match the *whole* argv/path string, so a
+"contains this anywhere" pattern needs leading and trailing `*` (e.g. `*sudo*`
+matches `sudo rm -rf /`, but `sudo*` would not). Edits take effect the next
+time you open or switch to a session — not live mid-session.
 
 ## How it works
 

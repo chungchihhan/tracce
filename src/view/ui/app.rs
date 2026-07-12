@@ -1158,7 +1158,7 @@ impl App {
     }
 
     fn draw_help(&self, f: &mut Frame, area: Rect) {
-        let rect = centered_fixed(58, 34, area);
+        let rect = centered_fixed(58, 37, area);
         let block = modal_block(" keybindings ");
         let inner = block.inner(rect);
         f.render_widget(Clear, rect);
@@ -1184,6 +1184,9 @@ impl App {
             help_group("Activity glyphs"),
             help_legend("R read  W write  C create  X close  D delete"),
             help_legend("M move  E edit  A multi-edit  $ bash  ⚠ sensitive"),
+            Line::raw(""),
+            help_group("Flag severity"),
+            help_legend("! warning (yellow)  ‼ critical (red) — edit ~/.tracce/flags.json"),
             Line::raw(""),
             help_group("General"),
             help_kv("h / ? / F1", "toggle this help"),
