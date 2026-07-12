@@ -153,9 +153,14 @@ pub fn import(archive: &Path, root: &Path, force: bool) -> Result<String> {
         // to `cap` (not `cap + 1`) before rejecting.
         let mut limited = entry.by_ref().take(cap);
         std::io::copy(&mut limited, &mut out).with_context(|| format!("extract {name}"))?;
-        // One more byte readable past the cap ⇒ over the limit.
-        if entry.read(&mut [0u8; 1]).unwrap_or(0) > 0 {
-            bail!("entry `{name}` exceeds the {cap}-byte limit");
+        // One more byte readable past the cap ⇒ over the limit. A read *error*
+        // here means we can't confirm the entry is within the cap, so fail
+        // closed (reject) rather than silently accepting a truncated/corrupt
+        // entry — this is the untrusted-input path.
+        match entry.read(&mut [0u8; 1]) {
+            Ok(0) => {}
+            Ok(_) => bail!("entry `{name}` exceeds the {cap}-byte limit"),
+            Err(e) => return Err(e).with_context(|| format!("read {name}")),
         }
         seen.push(name);
     }
@@ -185,9 +190,10 @@ pub fn import(archive: &Path, root: &Path, force: bool) -> Result<String> {
         .with_context(|| format!("create {}", sessions_dir.display()))?;
 
     // Build the finished session in a second staging dir on the destination
-    // filesystem, then swap it into place with a single rename so `dest_dir` is
-    // only ever the complete session or absent — never half-populated. The
-    // TempDir guards clean themselves up if we bail before the swap.
+    // filesystem, then swap it into place with a single rename so `dest_dir`
+    // appears in the namespace all at once — never as a partially-created
+    // directory. The TempDir guards clean themselves up if we bail before the
+    // swap.
     let assembled = tempfile::Builder::new()
         .prefix(".incoming-")
         .tempdir_in(&sessions_dir)
@@ -201,8 +207,11 @@ pub fn import(archive: &Path, root: &Path, force: bool) -> Result<String> {
     }
 
     // Atomic swap. `assembled` is a sibling of `dest_dir` inside `sessions/`, so
-    // this rename is same-filesystem and atomic — the destination is only ever
-    // the complete session or absent, never half-populated. A forced overwrite
+    // this rename is same-filesystem and atomic *in the namespace* — `dest_dir`
+    // is only ever the whole directory or absent, never a partially-created one.
+    // Note we don't fsync the extracted files, so this is not a crash-durability
+    // guarantee: on power loss the contents may be incomplete. The source
+    // archive is the source of truth — re-import to recover. A forced overwrite
     // removes the old session first (rename onto a non-empty dir fails on most
     // platforms); the remove→rename window is unavoidable without renameat2, but
     // since the replacement is already fully assembled, a crash in that window
