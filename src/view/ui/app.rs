@@ -63,6 +63,10 @@ pub struct App {
     pub paused: bool,
     pub dropped: usize,
     pub quit: bool,
+    /// Set by `s` to return to the session picker without quitting the process.
+    /// `view::run::run` checks this after the render loop exits and, when set,
+    /// reopens the picker instead of returning.
+    pub switch: bool,
     pub mode: Mode,
     /// Per-pane visibility, indexed by `PANE_ORDER`. At least one is always true.
     /// `Events` (index 4) is the EVENTS/s band, toggled by `5`.
@@ -115,6 +119,7 @@ impl App {
             paused: false,
             dropped: 0,
             quit: false,
+            switch: false,
             mode: Mode::Normal,
             visible: [true; 5],
             filters: std::array::from_fn(|_| String::new()),
@@ -205,6 +210,9 @@ impl App {
             }
             // `e` exports the session being viewed to ./<id>.tracce.tgz.
             (KeyCode::Char('e'), _) => self.export_session(),
+            // `s` returns to the session picker (e.g. to switch to another live
+            // session) without a confirm prompt — it's non-destructive, unlike quit.
+            (KeyCode::Char('s'), _) => self.switch = true,
             // `/` opens filter on the focused row pane (Events isn't filterable).
             (KeyCode::Char('/'), _) => {
                 if let Some(p) = self.focus {
@@ -1126,7 +1134,8 @@ impl App {
         let mut spans: Vec<Span> = Vec::new();
         for (k, label) in [
             ("Tab", "focus"), ("1-5", "show"), ("↵", "detail"), ("f", "follow"),
-            ("/", "filter"), ("p", "pause"), ("e", "export"), ("h", "help"), ("q", "quit"),
+            ("/", "filter"), ("p", "pause"), ("e", "export"), ("s", "switch"),
+            ("h", "help"), ("q", "quit"),
         ] {
             spans.push(Span::styled(format!(" {k} "), key_style));
             spans.push(Span::styled(format!(" {label}  "), label_style));
@@ -1156,6 +1165,7 @@ impl App {
             help_kv("p", "pause / resume"),
             help_kv("/", "filter focused pane"),
             help_kv("e", "export this session to ./<id>.tracce.tgz"),
+            help_kv("s", "switch session (back to the picker)"),
             Line::raw(""),
             help_group("Activity glyphs"),
             help_legend("R read  W write  C create  X close  D delete"),
@@ -1572,6 +1582,15 @@ mod tests {
         app.handle_key(key('q'));
         app.handle_key(key('y'));
         assert!(app.quit);
+    }
+
+    #[test]
+    fn s_requests_switch_without_confirm() {
+        let mut app = test_app();
+        app.handle_key(key('s'));
+        assert!(app.switch);
+        assert!(!app.quit);
+        assert_eq!(app.mode, Mode::Normal); // no confirm modal — non-destructive
     }
 
     #[test]

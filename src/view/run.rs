@@ -9,16 +9,33 @@ use std::time::Duration;
 
 const INGEST_CHUNK: usize = 5000;
 
+/// What the render loop ended with: the user quit outright, or asked (via `s`)
+/// to go back to the session picker and view something else.
+pub enum Outcome {
+    Quit,
+    Switch,
+}
+
 pub fn run(target: Option<String>, latest: bool, no_follow: bool, root: &Path) -> Result<()> {
-    let entry = select_entry(target, latest, root)?;
-    let follow = !no_follow && entry.status == "live";
-    run_entry(entry, follow)
+    let mut entry = select_entry(target, latest, root)?;
+    loop {
+        let follow = !no_follow && entry.status == "live";
+        match run_entry(entry, follow)? {
+            Outcome::Quit => return Ok(()),
+            Outcome::Switch => {
+                match picker::pick(discovery::discover(root)?)? {
+                    Some(e) => entry = e,
+                    None => return Ok(()),
+                }
+            }
+        }
+    }
 }
 
 /// Render a specific session entry in the TUI. Shared by `view` (which selects
 /// an entry first) and `attach` (which hands in a live session it just created,
 /// with `follow = true`).
-pub fn run_entry(entry: discovery::SessionEntry, follow: bool) -> Result<()> {
+pub fn run_entry(entry: discovery::SessionEntry, follow: bool) -> Result<Outcome> {
     let mut tail = Tail::open(&entry.events_path, follow)?;
     let mut app = App::new(entry);
 
@@ -27,7 +44,7 @@ pub fn run_entry(entry: discovery::SessionEntry, follow: bool) -> Result<()> {
     let mut term = Terminal::new(backend)?;
 
     let mut initial_load_done = false;
-    while !app.quit {
+    while !app.quit && !app.switch {
         if !initial_load_done {
             let batch = tail.drain_up_to(Duration::from_millis(0), INGEST_CHUNK)?;
             if batch.is_empty() {
@@ -64,7 +81,7 @@ pub fn run_entry(entry: discovery::SessionEntry, follow: bool) -> Result<()> {
         }
     }
 
-    Ok(())
+    Ok(if app.switch { Outcome::Switch } else { Outcome::Quit })
 }
 
 fn select_entry(target: Option<String>, latest: bool, root: &Path) -> Result<crate::view::discovery::SessionEntry> {
@@ -81,6 +98,11 @@ fn select_entry(target: Option<String>, latest: bool, root: &Path) -> Result<cra
 /// Resolve a target (session id / id-prefix) or `--latest` to a single session
 /// entry, falling back to the picker when neither is given. Shared by `view`
 /// (after its file-path special case) and `export`.
+///
+/// No auto-pick shortcuts: a bare `view`/`export` with no target and no
+/// `--latest` always opens the picker, even when there's only one session or
+/// exactly one live one — the user asked for the selection page every time, so
+/// they always get a chance to pick a different (e.g. finished) session instead.
 pub fn resolve_entry(target: Option<String>, latest: bool, root: &Path) -> Result<discovery::SessionEntry> {
     let entries = discovery::discover(root)?;
     if entries.is_empty() {
@@ -103,18 +125,11 @@ pub fn resolve_entry(target: Option<String>, latest: bool, root: &Path) -> Resul
         return Err(anyhow!("`{t}` is ambiguous: {} matches", matches.len()));
     }
     if latest {
-        // entries is sorted live-first then by started_at desc, so entries[0]
-        // is the most recent — live if any, otherwise the latest finished one.
-        return Ok(entries[0].clone());
-    }
-    // Auto-pick rule from spec: 1 live -> open it; 1 total -> open it; else picker.
-    let live: Vec<_> = entries.iter().filter(|e| e.status == "live").collect();
-    if live.len() == 1 {
-        let only_live = live[0].clone();
-        return Ok(only_live);
-    }
-    if entries.len() == 1 {
-        return Ok(entries[0].clone());
+        // Purely by recency (started_at), live or not — unlike the picker's
+        // display order, `--latest` never favors a live session over a more
+        // recently-started finished one.
+        let newest = entries.iter().max_by_key(|e| e.meta.started_at).unwrap().clone();
+        return Ok(newest);
     }
     match picker::pick(entries)? {
         Some(e) => Ok(e),
