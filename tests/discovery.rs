@@ -75,6 +75,7 @@ fn discover_orders_live_first_then_recent() {
 #[test]
 fn app_ingests_events_into_panes() {
     use tracce::event::{Event, EventData, EventKind, FileOp, ProcessRef};
+    use tracce::flags::FlagConfig;
     use tracce::view::discovery::SessionEntry;
     use tracce::view::ui::app::App;
     use tracce::trace::session::Meta;
@@ -94,7 +95,7 @@ fn app_ingests_events_into_panes() {
         status: "live".into(),
         events_path: "/tmp/events.jsonl".into(),
     };
-    let mut app = App::new(session);
+    let mut app = App::new(session, FlagConfig::empty());
 
     app.ingest(Event {
         ts_ns: 1, kind: EventKind::Open, pid: 4711, ppid: 1,

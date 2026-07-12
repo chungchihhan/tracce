@@ -1,4 +1,5 @@
 use crate::event::Event;
+use crate::flags::{FlagConfig, Severity};
 use crate::view::discovery::SessionEntry;
 use crossterm::event::{self, Event as CtEvent, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
@@ -85,6 +86,9 @@ pub struct App {
     detail: Option<DetailView>,
     /// Result message shown in the export flash modal; `None` outside it.
     pub flash: Option<String>,
+    /// User-editable command/path flag patterns (yellow/red severity
+    /// coloring), loaded once when the session is opened.
+    flags: FlagConfig,
 
     // derived state
     pub processes: HashMap<u32, ProcInfo>,
@@ -111,7 +115,7 @@ pub struct CommandRow { pub pid: u32, pub argv: String, pub ts_ns: u64 }
 pub struct NetRow { pub host: String, pub conns: usize, pub last_ts_ns: u64 }
 
 impl App {
-    pub fn new(session: SessionEntry) -> Self {
+    pub fn new(session: SessionEntry, flags: FlagConfig) -> Self {
         Self {
             session,
             events: Vec::new(),
@@ -127,6 +131,7 @@ impl App {
             list_state: std::array::from_fn(|_| ListState::default()),
             detail: None,
             flash: None,
+            flags,
             processes: HashMap::new(),
             recent_files: Vec::new(),
             commands: Vec::new(),
@@ -1545,6 +1550,10 @@ mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     fn test_app() -> App {
+        test_app_with(FlagConfig::empty())
+    }
+
+    fn test_app_with(flags: FlagConfig) -> App {
         let meta = Meta {
             session_id: "test".into(),
             started_at: chrono::Utc::now(),
@@ -1563,7 +1572,7 @@ mod tests {
             status: "replay".into(),
             events_path: PathBuf::from("/tmp/events.jsonl"),
         };
-        App::new(entry)
+        App::new(entry, flags)
     }
 
     fn key(c: char) -> KeyEvent { KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE) }
@@ -1921,7 +1930,7 @@ mod tests {
         std::fs::write(dir.join("meta.json"), format!(r#"{{"session_id":"{id}","started_at":"2026-05-28T22:04:31Z","ended_at":null,"cwd":"/tmp/demo","argv":["claude"],"claude_pid":1,"tracer_pid":2,"hostname":"h","macos_version":"15","tracce_version":"0.1"}}"#)).unwrap();
         let entry = crate::view::discovery::entry_for_dir(&dir).unwrap();
 
-        let mut app = App::new(entry);
+        let mut app = App::new(entry, FlagConfig::empty());
         // Export writes the default ./<id>.tracce.tgz into cwd; point cwd at tmp
         // so the artifact lands there and is cleaned up with the TempDir. cwd is
         // process-global and tests run in parallel, so a CwdGuard restores it

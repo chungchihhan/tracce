@@ -1,3 +1,4 @@
+use crate::flags::FlagConfig;
 use crate::view::{discovery, picker, tail::Tail, ui::app::App};
 use anyhow::{anyhow, Result};
 use crossterm::event::{self, Event as CtEvent};
@@ -37,7 +38,7 @@ pub fn run(target: Option<String>, latest: bool, no_follow: bool, root: &Path) -
 /// with `follow = true`).
 pub fn run_entry(entry: discovery::SessionEntry, follow: bool) -> Result<Outcome> {
     let mut tail = Tail::open(&entry.events_path, follow)?;
-    let mut app = App::new(entry);
+    let mut app = App::new(entry, FlagConfig::empty());
 
     let _guard = crate::view::TerminalGuard::enter()?;
     let backend = CrosstermBackend::new(stdout());
