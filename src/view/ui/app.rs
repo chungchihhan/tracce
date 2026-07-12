@@ -1925,6 +1925,103 @@ mod tests {
     }
 
     #[test]
+    fn ingest_prefers_critical_over_warning_for_both_commands_and_files() {
+        use crate::event::{Event, EventData, EventKind, FileOp, ProcessRef};
+        use std::sync::Arc;
+
+        // Patterns overlap: "*sudo*" is both critical and warning; "*.env*" too.
+        let cfg = crate::flags::build(
+            vec!["*sudo*".to_string(), "*.env*".to_string()],
+            vec!["*sudo*".to_string(), "*.env*".to_string()],
+        );
+        let mut app = test_app_with(cfg);
+
+        app.ingest(Event {
+            ts_ns: 1, kind: EventKind::Exec, pid: 55, ppid: 1,
+            process: Arc::new(ProcessRef {
+                pid: 55, comm: "sudo".into(), image: PathBuf::from("/usr/bin/sudo"),
+                argv: vec!["/usr/bin/sudo".into(), "rm".into(), "-rf".into(), "/tmp/x".into()],
+            }),
+            data: EventData::Exec {
+                argv: vec!["/usr/bin/sudo".into(), "rm".into(), "-rf".into(), "/tmp/x".into()],
+                image: PathBuf::from("/usr/bin/sudo"),
+            },
+            flags: 0,
+        });
+        assert_eq!(app.commands[0].severity, Some(Severity::Critical));
+        assert_eq!(app.processes[&55].severity, Some(Severity::Critical));
+
+        app.ingest(Event {
+            ts_ns: 2, kind: EventKind::Open, pid: 9, ppid: 1,
+            process: Arc::new(ProcessRef {
+                pid: 9, comm: "cat".into(), image: PathBuf::from("/bin/cat"), argv: vec![],
+            }),
+            data: EventData::File { op: FileOp::Open, path: PathBuf::from("/x/y/.env"), size: None },
+            flags: 0,
+        });
+        assert_eq!(app.recent_files[0].severity, Some(Severity::Critical));
+    }
+
+    #[test]
+    fn flagged_rows_render_severity_glyph_and_background_color() {
+        use crate::event::{Event, EventData, EventKind, FileOp, ProcessRef};
+        use std::sync::Arc;
+
+        let cfg = crate::flags::build(
+            vec!["*sudo*".to_string()],
+            vec!["*.env*".to_string()],
+        );
+        let mut app = test_app_with(cfg);
+
+        app.ingest(Event {
+            ts_ns: 1, kind: EventKind::Exec, pid: 55, ppid: 1,
+            process: Arc::new(ProcessRef {
+                pid: 55, comm: "sudo".into(), image: PathBuf::from("/usr/bin/sudo"),
+                argv: vec!["/usr/bin/sudo".into(), "rm".into(), "-rf".into(), "/tmp/x".into()],
+            }),
+            data: EventData::Exec {
+                argv: vec!["/usr/bin/sudo".into(), "rm".into(), "-rf".into(), "/tmp/x".into()],
+                image: PathBuf::from("/usr/bin/sudo"),
+            },
+            flags: 0,
+        });
+        app.ingest(Event {
+            ts_ns: 2, kind: EventKind::Open, pid: 9, ppid: 1,
+            process: Arc::new(ProcessRef {
+                pid: 9, comm: "cat".into(), image: PathBuf::from("/bin/cat"), argv: vec![],
+            }),
+            data: EventData::File { op: FileOp::Open, path: PathBuf::from("/x/y/.env"), size: None },
+            flags: 0,
+        });
+
+        let backend = ratatui::backend::TestBackend::new(80, 12);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+
+        term.draw(|f| app.draw_commands(f, f.area())).unwrap();
+        let buf = term.backend().buffer();
+        let text: String = buf.content().iter().map(|c| c.symbol()).collect();
+        assert!(text.contains('‼'), "expected critical glyph in COMMANDS pane, got: {text}");
+        assert!(
+            buf.content().iter().any(|c| c.bg == Color::Red),
+            "expected a red-background cell in COMMANDS pane for the critical row"
+        );
+
+        term.draw(|f| app.draw_files(f, f.area())).unwrap();
+        let buf = term.backend().buffer();
+        let text: String = buf.content().iter().map(|c| c.symbol()).collect();
+        assert!(text.contains('!'), "expected warning glyph in ACTIVITY pane, got: {text}");
+        assert!(
+            buf.content().iter().any(|c| c.bg == Color::Yellow),
+            "expected a yellow-background cell in ACTIVITY pane for the warning row"
+        );
+
+        term.draw(|f| app.draw_processes(f, f.area())).unwrap();
+        let buf = term.backend().buffer();
+        let text: String = buf.content().iter().map(|c| c.symbol()).collect();
+        assert!(text.contains('‼'), "expected critical glyph in PROCESS TREE pane, got: {text}");
+    }
+
+    #[test]
     fn unflagged_events_have_no_severity() {
         use crate::event::{Event, EventData, EventKind, ProcessRef};
         use std::sync::Arc;
