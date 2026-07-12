@@ -109,9 +109,9 @@ pub struct App {
     events_zoom: usize,
 }
 
-pub struct ProcInfo { pub pid: u32, pub comm: String, pub ppid: u32, pub event_count: usize, pub last_ts_ns: u64 }
-pub struct FileRow { pub pid: u32, pub comm: String, pub op: char, pub path: PathBuf, pub sensitive: bool, pub coalesced: bool, pub ts_ns: u64 }
-pub struct CommandRow { pub pid: u32, pub argv: String, pub ts_ns: u64 }
+pub struct ProcInfo { pub pid: u32, pub comm: String, pub ppid: u32, pub event_count: usize, pub last_ts_ns: u64, pub severity: Option<Severity> }
+pub struct FileRow { pub pid: u32, pub comm: String, pub op: char, pub path: PathBuf, pub sensitive: bool, pub coalesced: bool, pub ts_ns: u64, pub severity: Option<Severity> }
+pub struct CommandRow { pub pid: u32, pub argv: String, pub ts_ns: u64, pub severity: Option<Severity> }
 pub struct NetRow { pub host: String, pub conns: usize, pub last_ts_ns: u64 }
 
 impl App {
@@ -609,6 +609,7 @@ impl App {
                 ppid: target_ppid,
                 event_count: 0,
                 last_ts_ns: ev.ts_ns,
+                severity: None,
             });
             info.event_count += 1;
             info.last_ts_ns = ev.ts_ns;
@@ -625,6 +626,7 @@ impl App {
                         info.comm = base.to_string();
                     }
                 }
+                info.severity = self.flags.classify(&argv.join(" "));
             }
         }
 
@@ -636,7 +638,8 @@ impl App {
                 // Joining with spaces works for both shapes.
                 let joined = argv.join(" ");
                 if !joined.is_empty() {
-                    self.commands.insert(0, CommandRow { pid: ev.pid, argv: joined, ts_ns: ev.ts_ns });
+                    let severity = self.flags.classify(&joined);
+                    self.commands.insert(0, CommandRow { pid: ev.pid, argv: joined, ts_ns: ev.ts_ns, severity });
                     if self.commands.len() > 500 { self.commands.truncate(500); }
                     self.glue_selection(Pane::Commands, self.commands.len());
                 }
@@ -646,6 +649,7 @@ impl App {
                 let comm = self.processes.get(&ev.pid)
                     .map(|p| p.comm.clone())
                     .unwrap_or_else(|| ev.process.comm.clone());
+                let severity = self.flags.classify(&path.display().to_string());
                 self.recent_files.insert(0, FileRow {
                     pid: ev.pid,
                     comm,
@@ -663,6 +667,7 @@ impl App {
                     path: path.clone(),
                     sensitive: ev.flags & crate::event::FLAG_SENSITIVE != 0,
                     coalesced: ev.flags & crate::event::FLAG_COALESCED != 0,
+                    severity,
                     ts_ns: ev.ts_ns,
                 });
                 if self.recent_files.len() > 200 { self.recent_files.truncate(200); }
@@ -1651,6 +1656,7 @@ mod tests {
                 ppid: if pid == 1 { 0 } else { 1 },
                 event_count: 0,
                 last_ts_ns: 0,
+                severity: None,
             });
         }
         assert!(app.focus.is_none(), "test relies on follow-all (no selection)");
@@ -1702,7 +1708,7 @@ mod tests {
     fn f_returns_focused_pane_to_follow() {
         let mut app = test_app();
         app.focus = Some(Pane::Commands);
-        app.commands = vec![CommandRow { pid: 1, argv: "a".into(), ts_ns: 0 }];
+        app.commands = vec![CommandRow { pid: 1, argv: "a".into(), ts_ns: 0, severity: None }];
         app.handle_key(code(KeyCode::Down));
         assert_eq!(app.focus_selected(), Some(0));
         app.handle_key(key('f'));
@@ -1714,8 +1720,8 @@ mod tests {
         let mut app = test_app();
         app.focus = Some(Pane::Commands);
         app.commands = vec![
-            CommandRow { pid: 1, argv: "rg foo".into(), ts_ns: 0 },
-            CommandRow { pid: 2, argv: "ls -la".into(), ts_ns: 0 },
+            CommandRow { pid: 1, argv: "rg foo".into(), ts_ns: 0, severity: None },
+            CommandRow { pid: 2, argv: "ls -la".into(), ts_ns: 0, severity: None },
         ];
         // Enter filter mode, type "rg", commit.
         app.handle_key(key('/'));
@@ -1831,6 +1837,76 @@ mod tests {
     }
 
     #[test]
+    fn exec_command_matching_critical_pattern_is_flagged() {
+        use crate::event::{Event, EventData, EventKind, ProcessRef};
+        use std::sync::Arc;
+
+        let cfg = crate::flags::build(vec!["*sudo*".to_string()], vec![]);
+        let mut app = test_app_with(cfg);
+        let ev = Event {
+            ts_ns: 1,
+            kind: EventKind::Exec,
+            pid: 55,
+            ppid: 1,
+            process: Arc::new(ProcessRef {
+                pid: 55,
+                comm: "sudo".into(),
+                image: PathBuf::from("/usr/bin/sudo"),
+                argv: vec!["/usr/bin/sudo".into(), "rm".into(), "-rf".into(), "/tmp/x".into()],
+            }),
+            data: EventData::Exec {
+                argv: vec!["/usr/bin/sudo".into(), "rm".into(), "-rf".into(), "/tmp/x".into()],
+                image: PathBuf::from("/usr/bin/sudo"),
+            },
+            flags: 0,
+        };
+        app.ingest(ev);
+        assert_eq!(app.commands[0].severity, Some(Severity::Critical));
+        assert_eq!(app.processes[&55].severity, Some(Severity::Critical));
+    }
+
+    #[test]
+    fn file_event_matching_warning_pattern_is_flagged() {
+        use crate::event::{Event, EventData, EventKind, FileOp, ProcessRef};
+        use std::sync::Arc;
+
+        let cfg = crate::flags::build(vec![], vec!["*.env*".to_string()]);
+        let mut app = test_app_with(cfg);
+        let ev = Event {
+            ts_ns: 1,
+            kind: EventKind::Open,
+            pid: 9,
+            ppid: 1,
+            process: Arc::new(ProcessRef {
+                pid: 9, comm: "cat".into(), image: PathBuf::from("/bin/cat"), argv: vec![],
+            }),
+            data: EventData::File { op: FileOp::Open, path: PathBuf::from("/x/y/.env"), size: None },
+            flags: 0,
+        };
+        app.ingest(ev);
+        assert_eq!(app.recent_files[0].severity, Some(Severity::Warning));
+    }
+
+    #[test]
+    fn unflagged_events_have_no_severity() {
+        use crate::event::{Event, EventData, EventKind, ProcessRef};
+        use std::sync::Arc;
+
+        let mut app = test_app(); // FlagConfig::empty()
+        let ev = Event {
+            ts_ns: 1, kind: EventKind::Exec, pid: 1, ppid: 0,
+            process: Arc::new(ProcessRef {
+                pid: 1, comm: "echo".into(), image: PathBuf::from("/bin/echo"), argv: vec!["/bin/echo".into()],
+            }),
+            data: EventData::Exec { argv: vec!["/bin/echo".into()], image: PathBuf::from("/bin/echo") },
+            flags: 0,
+        };
+        app.ingest(ev);
+        assert_eq!(app.commands[0].severity, None);
+        assert_eq!(app.processes[&1].severity, None);
+    }
+
+    #[test]
     fn wrap_text_breaks_on_spaces_and_hard_splits_long_tokens() {
         assert_eq!(wrap_text("a b c", 10), vec!["a b c"]);
         assert_eq!(wrap_text("hello world foo", 5), vec!["hello", "world", "foo"]);
@@ -1844,9 +1920,9 @@ mod tests {
         let mut app = test_app();
         app.focus = Some(Pane::Commands);
         app.commands = vec![
-            CommandRow { pid: 1, argv: "a".into(), ts_ns: 0 },
-            CommandRow { pid: 2, argv: "b".into(), ts_ns: 0 },
-            CommandRow { pid: 3, argv: "c".into(), ts_ns: 0 },
+            CommandRow { pid: 1, argv: "a".into(), ts_ns: 0, severity: None },
+            CommandRow { pid: 2, argv: "b".into(), ts_ns: 0, severity: None },
+            CommandRow { pid: 3, argv: "c".into(), ts_ns: 0, severity: None },
         ];
         assert_eq!(app.focus_selected(), None); // follow: no highlight
         app.handle_key(code(KeyCode::Down));
@@ -1863,7 +1939,7 @@ mod tests {
     fn enter_opens_detail_and_esc_closes() {
         let mut app = test_app();
         app.focus = Some(Pane::Commands);
-        app.commands = vec![CommandRow { pid: 7, argv: "rg foo".into(), ts_ns: 0 }];
+        app.commands = vec![CommandRow { pid: 7, argv: "rg foo".into(), ts_ns: 0, severity: None }];
         app.handle_key(code(KeyCode::Enter));
         assert_eq!(app.mode, Mode::Detail);
         assert!(app.detail.is_some());
@@ -1888,8 +1964,8 @@ mod tests {
         let mut app = test_app();
         app.focus = Some(Pane::Commands);
         app.commands = vec![
-            CommandRow { pid: 1, argv: "old1".into(), ts_ns: 0 },
-            CommandRow { pid: 2, argv: "old2".into(), ts_ns: 0 },
+            CommandRow { pid: 1, argv: "old1".into(), ts_ns: 0, severity: None },
+            CommandRow { pid: 2, argv: "old2".into(), ts_ns: 0, severity: None },
         ];
         app.handle_key(code(KeyCode::Down));
         app.handle_key(code(KeyCode::Down)); // highlight "old2" at index 1
