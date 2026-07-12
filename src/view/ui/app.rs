@@ -413,6 +413,7 @@ impl App {
                         ("PID".into(), p.pid.to_string()),
                         ("Parent".into(), p.ppid.to_string()),
                         ("Events".into(), p.event_count.to_string()),
+                        ("Severity".into(), severity_label(p.severity)),
                         ("Last seen".into(), self.rel_time(p.last_ts_ns)),
                     ],
                 })
@@ -427,6 +428,7 @@ impl App {
                         ("Path".into(), r.path.display().to_string()),
                         ("Process".into(), format!("{} (pid {})", r.comm, r.pid)),
                         ("Sensitive".into(), if r.sensitive { "⚠  yes".into() } else { "no".into() }),
+                        ("Severity".into(), severity_label(r.severity)),
                         ("Burst".into(), if r.coalesced { "yes (coalesced)".into() } else { "no".into() }),
                         ("When".into(), self.rel_time(r.ts_ns)),
                     ],
@@ -440,6 +442,7 @@ impl App {
                     rows: vec![
                         ("PID".into(), r.pid.to_string()),
                         ("Argv".into(), r.argv.clone()),
+                        ("Severity".into(), severity_label(r.severity)),
                         ("When".into(), self.rel_time(r.ts_ns)),
                     ],
                 })
@@ -994,8 +997,9 @@ impl App {
     }
 
     fn draw_processes(&mut self, f: &mut Frame, area: Rect) {
-        // Per-row layout: "PPPPP  <prefix><comm padded to fill>  EEEEEE"
-        //                    5    2  variable      to flush      2  6
+        // Per-row layout: "! PPPPP  <prefix><comm padded to fill>  EEEEEE"
+        //                  2   5    2  variable      to flush      2  6
+        const SEV_W: usize = 2; // severity glyph + separator
         const PID_W: usize = 5;
         const SEP: usize = 2;
         const EV_W: usize = 6;
@@ -1004,13 +1008,13 @@ impl App {
         // We compute comm_at_depth_zero so the column header aligns with the
         // widest available comm — deeper rows just borrow from the comm budget.
         let base_comm_w = total_w
-            .saturating_sub(PID_W + SEP + SEP + EV_W + 2 /* borders */)
+            .saturating_sub(SEV_W + PID_W + SEP + SEP + EV_W + 2 /* borders */)
             .max(8);
 
         let header = format!(
-            "{:>w_pid$}  {:<w_comm$}  {:>w_ev$}",
-            "PID", "COMMAND", "EV",
-            w_pid = PID_W, w_comm = base_comm_w, w_ev = EV_W,
+            "{:sev_w$}{:>w_pid$}  {:<w_comm$}  {:>w_ev$}",
+            "", "PID", "COMMAND", "EV",
+            sev_w = SEV_W, w_pid = PID_W, w_comm = base_comm_w, w_ev = EV_W,
         );
         let body = self.framed_pane(f, area, "PROCESS TREE", Pane::Process, header);
 
@@ -1021,10 +1025,10 @@ impl App {
                 let prefix_cols = prefix.chars().count();
                 let comm_w = base_comm_w.saturating_sub(prefix_cols).max(4);
                 ListItem::new(format!(
-                    "{:>w_pid$}  {}{:<w_comm$}  {:>w_ev$}",
-                    p.pid, prefix, truncate(&p.comm, comm_w), p.event_count,
+                    "{} {:>w_pid$}  {}{:<w_comm$}  {:>w_ev$}",
+                    severity_glyph(p.severity), p.pid, prefix, truncate(&p.comm, comm_w), p.event_count,
                     w_pid = PID_W, w_comm = comm_w, w_ev = EV_W,
-                ))
+                )).style(severity_style(p.severity))
             }).collect();
         let focused = self.focus == Some(Pane::Process);
         render_rows(f, body, items, &mut self.list_state[pane_index(Pane::Process)], focused, true);
@@ -1032,9 +1036,9 @@ impl App {
 
     fn draw_files(&mut self, f: &mut Frame, area: Rect) {
         let body = self.framed_pane(f, area, "ACTIVITY", Pane::File,
-            format!("    {:>5} {:<8} {}", "PID", "COMM", "PATH / CMD"));
-        // Prefix is "X G PPPPP CCCCCCCC " = 1+1+1+1+5+1+8+1 = 19 cols
-        const PREFIX_COLS: usize = 19;
+            format!("      {:>5} {:<8} {}", "PID", "COMM", "PATH / CMD"));
+        // Prefix is "X G ! PPPPP CCCCCCCC " = 1+1+1+1+1+1+5+1+8+1 = 21 cols
+        const PREFIX_COLS: usize = 21;
         let path_cols = (body.width as usize).saturating_sub(PREFIX_COLS).max(1);
         let items: Vec<ListItem> = self.filtered_files().into_iter()
             .map(|r| {
@@ -1044,9 +1048,9 @@ impl App {
                     Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
                 } else { Style::default() };
                 ListItem::new(Line::from(vec![
-                    Span::raw(format!("{} {} {:>5} {:<8} ", r.op, glyph, r.pid, truncate(&r.comm, 8))),
+                    Span::raw(format!("{} {} {} {:>5} {:<8} ", r.op, glyph, severity_glyph(r.severity), r.pid, truncate(&r.comm, 8))),
                     Span::styled(format!("{}{}", truncate(&r.path.display().to_string(), path_cols), suffix), style),
-                ]))
+                ])).style(severity_style(r.severity))
             }).collect();
         let focused = self.focus == Some(Pane::File);
         render_rows(f, body, items, &mut self.list_state[pane_index(Pane::File)], focused, false);
@@ -1054,13 +1058,13 @@ impl App {
 
     fn draw_commands(&mut self, f: &mut Frame, area: Rect) {
         let body = self.framed_pane(f, area, "COMMANDS", Pane::Commands,
-            format!("{:>5}  {}", "PID", "ARGV"));
-        const PREFIX_COLS: usize = 7; // 5 pid + 2 sep
+            format!("  {:>5}  {}", "PID", "ARGV"));
+        const PREFIX_COLS: usize = 9; // 1 severity glyph + 1 sep + 5 pid + 2 sep
         let argv_cols = (body.width as usize).saturating_sub(PREFIX_COLS).max(1);
         let items: Vec<ListItem> = self.filtered_commands().into_iter()
             .map(|c| ListItem::new(format!(
-                "{:>5}  {}", c.pid, truncate(&c.argv, argv_cols),
-            )))
+                "{} {:>5}  {}", severity_glyph(c.severity), c.pid, truncate(&c.argv, argv_cols),
+            )).style(severity_style(c.severity)))
             .collect();
         let focused = self.focus == Some(Pane::Commands);
         render_rows(f, body, items, &mut self.list_state[pane_index(Pane::Commands)], focused, false);
@@ -1357,6 +1361,36 @@ fn op_name(op: char) -> &'static str {
         'R' => "read", 'W' => "write", 'C' => "create", 'X' => "close",
         'D' => "delete", 'M' => "move", 'E' => "edit", 'A' => "multi-edit",
         '$' => "bash", _ => "?",
+    }
+}
+
+/// Glyph for a row's user-flag severity: none, warning, or critical.
+fn severity_glyph(sev: Option<Severity>) -> &'static str {
+    match sev {
+        Some(Severity::Critical) => "‼",
+        Some(Severity::Warning) => "!",
+        None => " ",
+    }
+}
+
+/// Background tint for a row's user-flag severity, applied as the whole
+/// ListItem's style so unselected flagged rows get a colored background band.
+/// (The selection highlight always wins over this on the selected row — see
+/// the flagged-commands design doc.)
+fn severity_style(sev: Option<Severity>) -> Style {
+    match sev {
+        Some(Severity::Critical) => Style::default().bg(Color::Red).fg(Color::White),
+        Some(Severity::Warning) => Style::default().bg(Color::Yellow).fg(Color::Black),
+        None => Style::default(),
+    }
+}
+
+/// Human-readable severity for the detail modal.
+fn severity_label(sev: Option<Severity>) -> String {
+    match sev {
+        Some(Severity::Critical) => "‼ critical".into(),
+        Some(Severity::Warning) => "! warning".into(),
+        None => "none".into(),
     }
 }
 
