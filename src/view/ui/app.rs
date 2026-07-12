@@ -1044,7 +1044,7 @@ impl App {
             .map(|r| {
                 let glyph = if r.sensitive { "⚠" } else { " " };
                 let suffix = if r.coalesced { " (burst)" } else { "" };
-                let style = if r.sensitive {
+                let style = if r.sensitive && r.severity.is_none() {
                     Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
                 } else { Style::default() };
                 ListItem::new(Line::from(vec![
