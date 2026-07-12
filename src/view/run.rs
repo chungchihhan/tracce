@@ -75,6 +75,13 @@ fn select_entry(target: Option<String>, latest: bool, root: &Path) -> Result<cra
             return synthesize_entry_for_path(&p);
         }
     }
+    resolve_entry(target, latest, root)
+}
+
+/// Resolve a target (session id / id-prefix) or `--latest` to a single session
+/// entry, falling back to the picker when neither is given. Shared by `view`
+/// (after its file-path special case) and `export`.
+pub fn resolve_entry(target: Option<String>, latest: bool, root: &Path) -> Result<discovery::SessionEntry> {
     let entries = discovery::discover(root)?;
     if entries.is_empty() {
         return Err(anyhow!("no sessions found under {}", root.display()));
@@ -82,7 +89,17 @@ fn select_entry(target: Option<String>, latest: bool, root: &Path) -> Result<cra
     if let Some(t) = target {
         let matches: Vec<_> = entries.iter().filter(|e| e.meta.session_id.starts_with(&t)).cloned().collect();
         if matches.len() == 1 { return Ok(matches.into_iter().next().unwrap()); }
-        if matches.is_empty() { return Err(anyhow!("no session id matches `{t}`")); }
+        if matches.is_empty() {
+            // A file-path target is a common mistake here (e.g. `export ./meta.json`):
+            // this resolver only matches session ids, so say so rather than the
+            // bare "no session id matches".
+            if Path::new(&t).is_file() {
+                return Err(anyhow!(
+                    "`{t}` is a file, not a session id — pass a session id or id-prefix"
+                ));
+            }
+            return Err(anyhow!("no session id matches `{t}`"));
+        }
         return Err(anyhow!("`{t}` is ambiguous: {} matches", matches.len()));
     }
     if latest {

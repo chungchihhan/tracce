@@ -114,6 +114,18 @@ tracce list                            # sessions as a text table
 tracce exec -- npm test                # testing hatch: trace any command
 ```
 
+**Share a session** — a session is a self-contained folder, so export bundles it
+into one compressed file you can send; import drops it back in, ready to `view`:
+
+```sh
+tracce export <session-id-prefix>      # writes ./<id>.tracce.tgz
+tracce export --latest -o run.tracce.tgz
+tracce import run.tracce.tgz           # unpacks into ~/.tracce, then: tracce view <id>
+```
+
+You can also press `e` in the dashboard or the session picker to export the
+session you're looking at.
+
 If a trace crashes and leaves files in an odd state, run `tracce fix-perms`.
 
 ## The dashboard
@@ -148,6 +160,7 @@ path / argv / host, untruncated, plus when it happened). On the focused EVENTS/s
 | `/` | filter the focused pane |
 | `f` / `g` / `G` | follow latest / jump top / oldest |
 | `p` | pause |
+| `e` | export this session to `./<id>.tracce.tgz` |
 | `h` or `?` | help |
 | `q` / `Esc` | quit  ·  `Ctrl-C` quits immediately |
 
