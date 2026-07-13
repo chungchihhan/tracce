@@ -1577,8 +1577,16 @@ fn wrap_text(s: &str, width: usize) -> Vec<String> {
     lines
 }
 
+/// Truncate `s` to at most `n` characters, first collapsing embedded
+/// newlines/carriage returns to spaces. Every caller feeds a single `List`
+/// row: ratatui's `Text` splits raw content on `\n` into multiple `Line`s,
+/// which would silently expand that one row into two, smearing its
+/// background style (including our severity tint) onto whatever renders on
+/// the next display row. Argv and file paths routinely contain literal `\n`
+/// (e.g. a multi-line `bash -c "..."` script), so this isn't hypothetical.
 fn truncate(s: &str, n: usize) -> String {
-    if s.len() <= n { s.to_string() } else {
+    let s = s.replace(['\n', '\r'], " ");
+    if s.len() <= n { s } else {
         let mut t = s.chars().rev().take(n.saturating_sub(1)).collect::<String>();
         t = t.chars().rev().collect();
         format!("…{t}")
@@ -1871,6 +1879,72 @@ mod tests {
         app.ingest(ev);
         // The tree shows the clean basename, not the raw "/usr/bin/rg" path.
         assert_eq!(app.processes[&42].comm, "rg");
+    }
+
+    #[test]
+    fn embedded_newline_in_argv_does_not_bleed_into_the_row_below() {
+        // A command whose argv contains a literal '\n' (e.g. a multi-line
+        // `bash -c "..."` script) used to expand its ListItem to 2 physical
+        // rows (ratatui's Text splits raw content on '\n'), smearing that
+        // row's background style onto whatever rendered directly below it.
+        // `truncate()` now collapses embedded newlines to spaces first, so
+        // every COMMANDS row stays exactly one physical row.
+        use crate::event::{Event, EventData, EventKind, ProcessRef};
+        use std::sync::Arc;
+
+        let mut app = test_app();
+        app.ingest(Event {
+            ts_ns: 1, kind: EventKind::Exec, pid: 66, ppid: 1,
+            process: Arc::new(ProcessRef {
+                pid: 66, comm: "echo".into(), image: PathBuf::from("/bin/echo"),
+                argv: vec!["echo".into(), "second-command".into()],
+            }),
+            data: EventData::Exec {
+                argv: vec!["echo".into(), "second-command".into()],
+                image: PathBuf::from("/bin/echo"),
+            },
+            flags: 0,
+        });
+        app.ingest(Event {
+            ts_ns: 2, kind: EventKind::Exec, pid: 55, ppid: 1,
+            process: Arc::new(ProcessRef {
+                pid: 55, comm: "bash".into(), image: PathBuf::from("/bin/bash"),
+                argv: vec!["bash".into(), "-c".into(), "echo one\necho two".into()],
+            }),
+            data: EventData::Exec {
+                argv: vec!["bash".into(), "-c".into(), "echo one\necho two".into()],
+                image: PathBuf::from("/bin/bash"),
+            },
+            flags: 0,
+        });
+        // Newest-first: commands[0] is the multi-line one (pid 55), rendered
+        // at the top row; commands[1] (pid 66) is directly below it.
+        assert_eq!(app.commands[0].pid, 55);
+        assert_eq!(app.commands[1].pid, 66);
+
+        let backend = ratatui::backend::TestBackend::new(60, 6);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        term.draw(|f| app.draw_commands(f, f.area())).unwrap();
+        let buf = term.backend().buffer();
+        let row_text = |y: u16| -> String {
+            (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect()
+        };
+        // Row 2 is the top data row (row 0 = border+title, row 1 = header).
+        let top_row = row_text(2);
+        let next_row = row_text(3);
+
+        assert!(
+            top_row.contains("echo one") && top_row.contains("echo two"),
+            "expected both halves of the newline-joined argv on ONE row, got: {top_row:?}"
+        );
+        assert!(
+            next_row.contains("second-command"),
+            "expected pid 66's command directly below, got: {next_row:?}"
+        );
+        assert!(
+            !next_row.contains("echo two"),
+            "the multi-line command's tail leaked onto the row below: {next_row:?}"
+        );
     }
 
     #[test]
