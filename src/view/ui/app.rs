@@ -12,6 +12,10 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 const RATE_BUCKET_NS: u64 = 1_000_000_000;
+/// Synthetic root EXECs are emitted so poll-only sessions have a root row, but
+/// eslogger can emit the same root EXEC milliseconds later. Keep that pair from
+/// appearing twice in COMMANDS without hiding a genuinely repeated execution.
+const ROOT_EXEC_DEDUP_WINDOW_NS: u64 = 1_000_000_000;
 /// Height of the full-width EVENTS/s chart band (border + bars + x-axis baseline
 /// + time labels).
 const EVENTS_BAND_H: u16 = 11;
@@ -640,7 +644,13 @@ impl App {
                 // basenamed command as argv[0]) or a real argv array (eslogger).
                 // Joining with spaces works for both shapes.
                 let joined = argv.join(" ");
-                if !joined.is_empty() {
+                let duplicate_root_exec = ev.pid == self.session.meta.claude_pid
+                    && self.commands.iter().any(|row| {
+                        row.pid == ev.pid
+                            && row.argv == joined
+                            && row.ts_ns.abs_diff(ev.ts_ns) <= ROOT_EXEC_DEDUP_WINDOW_NS
+                    });
+                if !joined.is_empty() && !duplicate_root_exec {
                     let severity = self.flags.classify(&joined);
                     self.commands.insert(0, CommandRow { pid: ev.pid, argv: joined, ts_ns: ev.ts_ns, severity });
                     if self.commands.len() > 500 { self.commands.truncate(500); }
@@ -1945,6 +1955,41 @@ mod tests {
             !next_row.contains("echo two"),
             "the multi-line command's tail leaked onto the row below: {next_row:?}"
         );
+    }
+
+    #[test]
+    fn duplicate_root_exec_is_not_added_twice() {
+        use crate::event::{Event, EventData, EventKind, ProcessRef};
+        use std::sync::Arc;
+
+        let mut app = test_app();
+        app.session.meta.claude_pid = 55;
+        let root_exec = |ts_ns| Event {
+            ts_ns,
+            kind: EventKind::Exec,
+            pid: 55,
+            ppid: 1,
+            process: Arc::new(ProcessRef {
+                pid: 55,
+                comm: "bash".into(),
+                image: PathBuf::from("/bin/bash"),
+                argv: vec!["bash".into(), "-c".into(), "echo hi".into()],
+            }),
+            data: EventData::Exec {
+                argv: vec!["bash".into(), "-c".into(), "echo hi".into()],
+                image: PathBuf::from("/bin/bash"),
+            },
+            flags: 0,
+        };
+
+        // Synthetic root + eslogger root event: same PID/argv, milliseconds apart.
+        app.ingest(root_exec(1));
+        app.ingest(root_exec(1_000_000));
+        assert_eq!(app.commands.len(), 1);
+
+        // A genuinely later re-exec is still visible.
+        app.ingest(root_exec(ROOT_EXEC_DEDUP_WINDOW_NS + 2));
+        assert_eq!(app.commands.len(), 2);
     }
 
     #[test]
