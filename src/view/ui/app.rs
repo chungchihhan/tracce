@@ -1528,7 +1528,7 @@ fn help_group(name: &str) -> Line<'static> {
 fn help_kv(key: &str, desc: &str) -> Line<'static> {
     Line::from(vec![
         Span::raw("  "),
-        Span::styled(format!("{key:<14}"), Style::default().fg(Color::Yellow)),
+        Span::styled(format!("{key:<18}"), Style::default().fg(Color::Yellow)),
         Span::styled(desc.to_string(), Style::default().fg(Color::Gray)),
     ])
 }
