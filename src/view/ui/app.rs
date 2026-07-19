@@ -1202,7 +1202,7 @@ impl App {
     }
 
     fn draw_help(&self, f: &mut Frame, area: Rect) {
-        let rect = centered_fixed(80, 37, area);
+        let rect = centered_fixed(80, 39, area);
         let block = modal_block(" keybindings ");
         let inner = block.inner(rect);
         f.render_widget(Clear, rect);
@@ -1212,11 +1212,12 @@ impl App {
         lines.extend([
             Line::raw(""),
             help_group("Navigation"),
-            help_kv("Tab / S-Tab", "cycle focus (incl. follow-all)"),
+            help_kv("Tab / Shift-Tab", "cycle focus (incl. follow-all)"),
             help_kv("1 2 3 4 5", "show / hide panes & events"),
             help_kv("←↓↑→  j k", "move selection (rows)"),
             help_kv("← →  ·  ↑ ↓", "chart: scrub cursor · zoom time axis"),
-            help_kv("g / G  ·  t", "follow latest / oldest · tail"),
+            help_kv("g / G", "jump to latest / oldest"),
+            help_kv("t", "tail latest"),
             help_kv("Enter", "open detail (Esc closes)"),
             Line::raw(""),
             help_group("Display"),
@@ -1231,7 +1232,8 @@ impl App {
             help_legend("M move  E edit  A multi-edit  $ bash  ⚠ sensitive"),
             Line::raw(""),
             help_group("Flag severity"),
-            help_legend("! warning (yellow)  ‼ critical (red) — edit ~/.tracce/flags.json"),
+            help_legend("! warning (yellow)  ‼ critical (red)"),
+            help_legend("Edit patterns in ~/.tracce/flags.json"),
             Line::raw(""),
             help_group("General"),
             help_kv("h / ? / F1", "toggle this help"),
