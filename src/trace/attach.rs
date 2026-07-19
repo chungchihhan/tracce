@@ -82,7 +82,7 @@ pub fn run(pid: Option<u32>, root: &Path) -> Result<()> {
     let entry = crate::view::discovery::entry_for_dir(session.dir())?;
     // `s` (switch session) is a no-op here: attach is tied to this one recording,
     // so it's treated the same as quitting — just detach.
-    let render_result = crate::view::run::run_entry(entry, true).map(|_| ());
+    let render_result = crate::view::run::run_entry(entry, true, root).map(|_| ());
 
     // Tear everything down once the TUI exits.
     run::shutdown_sources(eslogger_handle, net_handle, tree_poll_handle, transcript_handle);

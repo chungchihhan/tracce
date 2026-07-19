@@ -20,7 +20,7 @@ pub fn run(target: Option<String>, latest: bool, no_follow: bool, root: &Path) -
     let mut entry = select_entry(target, latest, root)?;
     loop {
         let follow = !no_follow && entry.status == "live";
-        match run_entry(entry, follow)? {
+        match run_entry(entry, follow, root)? {
             Outcome::Quit => return Ok(()),
             Outcome::Switch => {
                 match picker::pick(discovery::discover(root)?)? {
@@ -35,9 +35,10 @@ pub fn run(target: Option<String>, latest: bool, no_follow: bool, root: &Path) -
 /// Render a specific session entry in the TUI. Shared by `view` (which selects
 /// an entry first) and `attach` (which hands in a live session it just created,
 /// with `follow = true`).
-pub fn run_entry(entry: discovery::SessionEntry, follow: bool) -> Result<Outcome> {
+pub fn run_entry(entry: discovery::SessionEntry, follow: bool, root: &Path) -> Result<Outcome> {
     let mut tail = Tail::open(&entry.events_path, follow)?;
-    let mut app = App::new(entry);
+    let flags = crate::flags::load(root);
+    let mut app = App::new(entry, flags);
 
     let _guard = crate::view::TerminalGuard::enter()?;
     let backend = CrosstermBackend::new(stdout());
