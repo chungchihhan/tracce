@@ -159,7 +159,8 @@ path / argv / host, untruncated, plus when it happened). On the focused EVENTS/s
 | `↑` `↓` *(graph)* | zoom the time axis |
 | `Enter` | open row detail |
 | `/` | filter the focused pane |
-| `f` / `g` / `G` | follow latest / jump top / oldest |
+| `t` / `g` / `G` | tail latest / follow latest / oldest |
+| `f` | show flagged rows in the focused pane |
 | `p` | pause |
 | `e` | export this session to `./<id>.tracce.tgz` |
 | `s` | switch session (back to the picker) |
