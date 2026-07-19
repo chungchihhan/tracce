@@ -1,6 +1,7 @@
 # Personal / working artifacts not for public history
 docs/
 CLAUDE.md
+AGENTS.md
 
 # Rust
 /target

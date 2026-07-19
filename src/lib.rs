@@ -1,5 +1,6 @@
 pub mod bundle;
 pub mod event;
+pub mod flags;
 pub mod fix_perms;
 pub mod hosts;
 pub mod list;

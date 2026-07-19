@@ -1,4 +1,5 @@
 use crate::event::Event;
+use crate::flags::{FlagConfig, Severity};
 use crate::view::discovery::SessionEntry;
 use crossterm::event::{self, Event as CtEvent, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
@@ -11,6 +12,10 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 const RATE_BUCKET_NS: u64 = 1_000_000_000;
+/// Synthetic root EXECs are emitted so poll-only sessions have a root row, but
+/// eslogger can emit the same root EXEC milliseconds later. Keep that pair from
+/// appearing twice in COMMANDS without hiding a genuinely repeated execution.
+const ROOT_EXEC_DEDUP_WINDOW_NS: u64 = 1_000_000_000;
 /// Height of the full-width EVENTS/s chart band (border + bars + x-axis baseline
 /// + time labels).
 const EVENTS_BAND_H: u16 = 11;
@@ -32,7 +37,8 @@ const LOGO: [&str; 6] = [
 pub enum Pane { Process, File, Commands, Network, Events }
 
 /// Panes in display + toggle order. Index here is the `1`..`5` key and the
-/// position in `App::visible` / `App::filters` / `App::list_state`. `Events` is
+/// position in `App::visible` / `App::filters` / `App::flagged_only` /
+/// `App::list_state`. `Events` is
 /// the full-width EVENTS/s chart band; it's focusable but has no filter or rows
 /// (its `list_state` selection is reused as the scrub cursor).
 const PANE_ORDER: [Pane; 5] = [Pane::Process, Pane::File, Pane::Commands, Pane::Network, Pane::Events];
@@ -74,6 +80,9 @@ pub struct App {
     /// Committed per-pane substring filter (lowercased compare), "" = no filter.
     /// `Events` has no filter (its slot stays empty).
     filters: [String; 5],
+    /// Per-pane flag-only filters. When set, row panes show only rows with a
+    /// warning or critical severity; Network and Events do not support it.
+    flagged_only: [bool; 5],
     /// Live text being typed while in `Mode::Filter`, not yet committed.
     filter_draft: String,
     /// Per-pane list selection + viewport. `selected == None` means "follow the
@@ -85,6 +94,9 @@ pub struct App {
     detail: Option<DetailView>,
     /// Result message shown in the export flash modal; `None` outside it.
     pub flash: Option<String>,
+    /// User-editable command/path flag patterns (yellow/red severity
+    /// coloring), loaded once when the session is opened.
+    flags: FlagConfig,
 
     // derived state
     pub processes: HashMap<u32, ProcInfo>,
@@ -105,13 +117,13 @@ pub struct App {
     events_zoom: usize,
 }
 
-pub struct ProcInfo { pub pid: u32, pub comm: String, pub ppid: u32, pub event_count: usize, pub last_ts_ns: u64 }
-pub struct FileRow { pub pid: u32, pub comm: String, pub op: char, pub path: PathBuf, pub sensitive: bool, pub coalesced: bool, pub ts_ns: u64 }
-pub struct CommandRow { pub pid: u32, pub argv: String, pub ts_ns: u64 }
+pub struct ProcInfo { pub pid: u32, pub comm: String, pub ppid: u32, pub event_count: usize, pub last_ts_ns: u64, pub severity: Option<Severity> }
+pub struct FileRow { pub pid: u32, pub comm: String, pub op: char, pub path: PathBuf, pub sensitive: bool, pub coalesced: bool, pub ts_ns: u64, pub severity: Option<Severity> }
+pub struct CommandRow { pub pid: u32, pub argv: String, pub ts_ns: u64, pub severity: Option<Severity> }
 pub struct NetRow { pub host: String, pub conns: usize, pub last_ts_ns: u64 }
 
 impl App {
-    pub fn new(session: SessionEntry) -> Self {
+    pub fn new(session: SessionEntry, flags: FlagConfig) -> Self {
         Self {
             session,
             events: Vec::new(),
@@ -123,10 +135,12 @@ impl App {
             mode: Mode::Normal,
             visible: [true; 5],
             filters: std::array::from_fn(|_| String::new()),
+            flagged_only: [false; 5],
             filter_draft: String::new(),
             list_state: std::array::from_fn(|_| ListState::default()),
             detail: None,
             flash: None,
+            flags,
             processes: HashMap::new(),
             recent_files: Vec::new(),
             commands: Vec::new(),
@@ -202,6 +216,10 @@ impl App {
                         self.filters[pane_index(p)].clear();
                         self.clamp_selection();
                     }
+                    Some(p) if self.flagged_only[pane_index(p)] => {
+                        self.flagged_only[pane_index(p)] = false;
+                        self.clamp_selection();
+                    }
                     _ => self.mode = Mode::QuitConfirm,
                 }
             }
@@ -222,8 +240,8 @@ impl App {
                     }
                 }
             }
-            // `f` drops the focused pane's highlight back to follow-latest.
-            (KeyCode::Char('f'), _) => self.sel_follow(),
+            // `f` toggles the focused pane to flagged rows only.
+            (KeyCode::Char('f'), _) => self.toggle_flagged_only(),
             (KeyCode::Tab, _) => self.cycle_focus(1),
             (KeyCode::BackTab, _) => self.cycle_focus(-1),
             (KeyCode::Char('1'), _) => self.toggle_visible(Pane::Process),
@@ -245,6 +263,7 @@ impl App {
             (KeyCode::Right, _) => self.sel_move(if self.focus == Some(Pane::Events) { -1 } else { 1 }),
             (KeyCode::PageDown, _)                        => self.sel_move(10),
             (KeyCode::PageUp, _)                          => self.sel_move(-10),
+            (KeyCode::Char('t'), _)                        => self.sel_follow(),
             (KeyCode::Char('g'), _) | (KeyCode::Home, _)  => self.sel_follow(),
             (KeyCode::Char('G'), _) | (KeyCode::End, _)   => self.sel_end(),
             (KeyCode::Enter, _)                           => self.open_detail(),
@@ -279,6 +298,16 @@ impl App {
     }
 
     fn pane_filter(&self, p: Pane) -> &str { &self.filters[pane_index(p)] }
+
+    fn pane_flagged_only(&self, p: Pane) -> bool { self.flagged_only[pane_index(p)] }
+
+    fn toggle_flagged_only(&mut self) {
+        let Some(p) = self.focus else { return };
+        if !matches!(p, Pane::Process | Pane::File | Pane::Commands) { return; }
+        let i = pane_index(p);
+        self.flagged_only[i] = !self.flagged_only[i];
+        self.clamp_selection();
+    }
 
     /// Number of selectable items in the focused pane (0 if no pane is focused).
     /// For `Events` this is the number of displayed bars at the current zoom —
@@ -330,7 +359,7 @@ impl App {
         st.select(next);
     }
 
-    /// `f` / `g` / Home: resume following the latest (drop the highlight/cursor).
+    /// `t` / `g` / Home: resume tailing the latest (drop the highlight/cursor).
     fn sel_follow(&mut self) {
         if let Some(p) = self.focus {
             self.list_state[pane_index(p)].select(None);
@@ -365,7 +394,7 @@ impl App {
     /// index shift is unreliable).
     fn glue_selection(&mut self, pane: Pane, len: usize) {
         let i = pane_index(pane);
-        if !self.filters[i].is_empty() { return; }
+        if !self.filters[i].is_empty() || self.flagged_only[i] { return; }
         if let Some(sel) = self.list_state[i].selected() {
             self.list_state[i].select(Some((sel + 1).min(len.saturating_sub(1))));
         }
@@ -408,6 +437,7 @@ impl App {
                         ("PID".into(), p.pid.to_string()),
                         ("Parent".into(), p.ppid.to_string()),
                         ("Events".into(), p.event_count.to_string()),
+                        ("Severity".into(), severity_label(p.severity)),
                         ("Last seen".into(), self.rel_time(p.last_ts_ns)),
                     ],
                 })
@@ -422,6 +452,7 @@ impl App {
                         ("Path".into(), r.path.display().to_string()),
                         ("Process".into(), format!("{} (pid {})", r.comm, r.pid)),
                         ("Sensitive".into(), if r.sensitive { "⚠  yes".into() } else { "no".into() }),
+                        ("Severity".into(), severity_label(r.severity)),
                         ("Burst".into(), if r.coalesced { "yes (coalesced)".into() } else { "no".into() }),
                         ("When".into(), self.rel_time(r.ts_ns)),
                     ],
@@ -435,6 +466,7 @@ impl App {
                     rows: vec![
                         ("PID".into(), r.pid.to_string()),
                         ("Argv".into(), r.argv.clone()),
+                        ("Severity".into(), severity_label(r.severity)),
                         ("When".into(), self.rel_time(r.ts_ns)),
                     ],
                 })
@@ -524,22 +556,27 @@ impl App {
     }
 
     // --- filtered views ---------------------------------------------------
-    // Each returns the rows a pane should display given its committed filter.
+    // Each returns the rows a pane should display given its committed text and
+    // flag-only filters.
     // focus_len() and the draw_* methods share these so scrolling stays in sync.
 
     fn filtered_files(&self) -> Vec<&FileRow> {
         let f = self.pane_filter(Pane::File).to_lowercase();
         self.recent_files.iter().filter(|r| {
-            f.is_empty()
+            (!self.pane_flagged_only(Pane::File) || r.severity.is_some())
+                && (f.is_empty()
                 || r.comm.to_lowercase().contains(&f)
-                || r.path.display().to_string().to_lowercase().contains(&f)
+                || r.path.display().to_string().to_lowercase().contains(&f))
         }).collect()
     }
 
     fn filtered_commands(&self) -> Vec<&CommandRow> {
         let f = self.pane_filter(Pane::Commands).to_lowercase();
         self.commands.iter()
-            .filter(|c| f.is_empty() || c.argv.to_lowercase().contains(&f))
+            .filter(|c| {
+                (!self.pane_flagged_only(Pane::Commands) || c.severity.is_some())
+                    && (f.is_empty() || c.argv.to_lowercase().contains(&f))
+            })
             .collect()
     }
 
@@ -558,11 +595,14 @@ impl App {
     /// pid-sorted list of matching processes (connectors would dangle).
     fn filtered_proc_rows(&self) -> Vec<(u32, String)> {
         let f = self.pane_filter(Pane::Process).to_lowercase();
-        if f.is_empty() {
+        if f.is_empty() && !self.pane_flagged_only(Pane::Process) {
             return build_tree_rows(&self.processes);
         }
         let mut v: Vec<(u32, String)> = self.processes.values()
-            .filter(|p| p.comm.to_lowercase().contains(&f))
+            .filter(|p| {
+                (!self.pane_flagged_only(Pane::Process) || p.severity.is_some())
+                    && (f.is_empty() || p.comm.to_lowercase().contains(&f))
+            })
             .map(|p| (p.pid, String::new()))
             .collect();
         v.sort_by_key(|(pid, _)| *pid);
@@ -604,6 +644,7 @@ impl App {
                 ppid: target_ppid,
                 event_count: 0,
                 last_ts_ns: ev.ts_ns,
+                severity: None,
             });
             info.event_count += 1;
             info.last_ts_ns = ev.ts_ns;
@@ -620,6 +661,7 @@ impl App {
                         info.comm = base.to_string();
                     }
                 }
+                info.severity = self.flags.classify(&argv.join(" "));
             }
         }
 
@@ -630,8 +672,15 @@ impl App {
                 // basenamed command as argv[0]) or a real argv array (eslogger).
                 // Joining with spaces works for both shapes.
                 let joined = argv.join(" ");
-                if !joined.is_empty() {
-                    self.commands.insert(0, CommandRow { pid: ev.pid, argv: joined, ts_ns: ev.ts_ns });
+                let duplicate_root_exec = ev.pid == self.session.meta.claude_pid
+                    && self.commands.iter().any(|row| {
+                        row.pid == ev.pid
+                            && row.argv == joined
+                            && row.ts_ns.abs_diff(ev.ts_ns) <= ROOT_EXEC_DEDUP_WINDOW_NS
+                    });
+                if !joined.is_empty() && !duplicate_root_exec {
+                    let severity = self.flags.classify(&joined);
+                    self.commands.insert(0, CommandRow { pid: ev.pid, argv: joined, ts_ns: ev.ts_ns, severity });
                     if self.commands.len() > 500 { self.commands.truncate(500); }
                     self.glue_selection(Pane::Commands, self.commands.len());
                 }
@@ -641,6 +690,7 @@ impl App {
                 let comm = self.processes.get(&ev.pid)
                     .map(|p| p.comm.clone())
                     .unwrap_or_else(|| ev.process.comm.clone());
+                let severity = self.flags.classify(&path.display().to_string());
                 self.recent_files.insert(0, FileRow {
                     pid: ev.pid,
                     comm,
@@ -658,6 +708,7 @@ impl App {
                     path: path.clone(),
                     sensitive: ev.flags & crate::event::FLAG_SENSITIVE != 0,
                     coalesced: ev.flags & crate::event::FLAG_COALESCED != 0,
+                    severity,
                     ts_ns: ev.ts_ns,
                 });
                 if self.recent_files.len() > 200 { self.recent_files.truncate(200); }
@@ -984,8 +1035,9 @@ impl App {
     }
 
     fn draw_processes(&mut self, f: &mut Frame, area: Rect) {
-        // Per-row layout: "PPPPP  <prefix><comm padded to fill>  EEEEEE"
-        //                    5    2  variable      to flush      2  6
+        // Per-row layout: "! PPPPP  <prefix><comm padded to fill>  EEEEEE"
+        //                  2   5    2  variable      to flush      2  6
+        const SEV_W: usize = 2; // severity glyph + separator
         const PID_W: usize = 5;
         const SEP: usize = 2;
         const EV_W: usize = 6;
@@ -994,13 +1046,13 @@ impl App {
         // We compute comm_at_depth_zero so the column header aligns with the
         // widest available comm — deeper rows just borrow from the comm budget.
         let base_comm_w = total_w
-            .saturating_sub(PID_W + SEP + SEP + EV_W + 2 /* borders */)
+            .saturating_sub(SEV_W + PID_W + SEP + SEP + EV_W + 2 /* borders */)
             .max(8);
 
         let header = format!(
-            "{:>w_pid$}  {:<w_comm$}  {:>w_ev$}",
-            "PID", "COMMAND", "EV",
-            w_pid = PID_W, w_comm = base_comm_w, w_ev = EV_W,
+            "{:sev_w$}{:>w_pid$}  {:<w_comm$}  {:>w_ev$}",
+            "", "PID", "COMMAND", "EV",
+            sev_w = SEV_W, w_pid = PID_W, w_comm = base_comm_w, w_ev = EV_W,
         );
         let body = self.framed_pane(f, area, "PROCESS TREE", Pane::Process, header);
 
@@ -1011,10 +1063,10 @@ impl App {
                 let prefix_cols = prefix.chars().count();
                 let comm_w = base_comm_w.saturating_sub(prefix_cols).max(4);
                 ListItem::new(format!(
-                    "{:>w_pid$}  {}{:<w_comm$}  {:>w_ev$}",
-                    p.pid, prefix, truncate(&p.comm, comm_w), p.event_count,
+                    "{} {:>w_pid$}  {}{:<w_comm$}  {:>w_ev$}",
+                    severity_glyph(p.severity), p.pid, prefix, truncate(&p.comm, comm_w), p.event_count,
                     w_pid = PID_W, w_comm = comm_w, w_ev = EV_W,
-                ))
+                )).style(severity_style(p.severity))
             }).collect();
         let focused = self.focus == Some(Pane::Process);
         render_rows(f, body, items, &mut self.list_state[pane_index(Pane::Process)], focused, true);
@@ -1022,21 +1074,21 @@ impl App {
 
     fn draw_files(&mut self, f: &mut Frame, area: Rect) {
         let body = self.framed_pane(f, area, "ACTIVITY", Pane::File,
-            format!("    {:>5} {:<8} {}", "PID", "COMM", "PATH / CMD"));
-        // Prefix is "X G PPPPP CCCCCCCC " = 1+1+1+1+5+1+8+1 = 19 cols
-        const PREFIX_COLS: usize = 19;
+            format!("      {:>5} {:<8} {}", "PID", "COMM", "PATH / CMD"));
+        // Prefix is "X G ! PPPPP CCCCCCCC " = 1+1+1+1+1+1+5+1+8+1 = 21 cols
+        const PREFIX_COLS: usize = 21;
         let path_cols = (body.width as usize).saturating_sub(PREFIX_COLS).max(1);
         let items: Vec<ListItem> = self.filtered_files().into_iter()
             .map(|r| {
                 let glyph = if r.sensitive { "⚠" } else { " " };
                 let suffix = if r.coalesced { " (burst)" } else { "" };
-                let style = if r.sensitive {
+                let style = if r.sensitive && r.severity.is_none() {
                     Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
                 } else { Style::default() };
                 ListItem::new(Line::from(vec![
-                    Span::raw(format!("{} {} {:>5} {:<8} ", r.op, glyph, r.pid, truncate(&r.comm, 8))),
+                    Span::raw(format!("{} {} {} {:>5} {:<8} ", r.op, glyph, severity_glyph(r.severity), r.pid, truncate(&r.comm, 8))),
                     Span::styled(format!("{}{}", truncate(&r.path.display().to_string(), path_cols), suffix), style),
-                ]))
+                ])).style(severity_style(r.severity))
             }).collect();
         let focused = self.focus == Some(Pane::File);
         render_rows(f, body, items, &mut self.list_state[pane_index(Pane::File)], focused, false);
@@ -1044,13 +1096,13 @@ impl App {
 
     fn draw_commands(&mut self, f: &mut Frame, area: Rect) {
         let body = self.framed_pane(f, area, "COMMANDS", Pane::Commands,
-            format!("{:>5}  {}", "PID", "ARGV"));
-        const PREFIX_COLS: usize = 7; // 5 pid + 2 sep
+            format!("  {:>5}  {}", "PID", "ARGV"));
+        const PREFIX_COLS: usize = 9; // 1 severity glyph + 1 sep + 5 pid + 2 sep
         let argv_cols = (body.width as usize).saturating_sub(PREFIX_COLS).max(1);
         let items: Vec<ListItem> = self.filtered_commands().into_iter()
             .map(|c| ListItem::new(format!(
-                "{:>5}  {}", c.pid, truncate(&c.argv, argv_cols),
-            )))
+                "{} {:>5}  {}", severity_glyph(c.severity), c.pid, truncate(&c.argv, argv_cols),
+            )).style(severity_style(c.severity)))
             .collect();
         let focused = self.focus == Some(Pane::Commands);
         render_rows(f, body, items, &mut self.list_state[pane_index(Pane::Commands)], focused, false);
@@ -1102,6 +1154,12 @@ impl App {
                 Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
             ));
         }
+        if self.pane_flagged_only(pane) {
+            spans.push(Span::styled(
+                "[flags] ",
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            ));
+        }
         Line::from(spans)
     }
 
@@ -1133,8 +1191,8 @@ impl App {
         let label_style = Style::default().fg(Color::Gray);
         let mut spans: Vec<Span> = Vec::new();
         for (k, label) in [
-            ("Tab", "focus"), ("1-5", "show"), ("↵", "detail"), ("f", "follow"),
-            ("/", "filter"), ("p", "pause"), ("e", "export"), ("s", "switch"),
+            ("Tab", "focus"), ("1-5", "show"), ("↵", "detail"), ("t", "tail"),
+            ("f", "flags"), ("/", "filter"), ("p", "pause"), ("e", "export"), ("s", "switch"),
             ("h", "help"), ("q", "quit"),
         ] {
             spans.push(Span::styled(format!(" {k} "), key_style));
@@ -1144,7 +1202,7 @@ impl App {
     }
 
     fn draw_help(&self, f: &mut Frame, area: Rect) {
-        let rect = centered_fixed(58, 34, area);
+        let rect = centered_fixed(80, 39, area);
         let block = modal_block(" keybindings ");
         let inner = block.inner(rect);
         f.render_widget(Clear, rect);
@@ -1154,22 +1212,28 @@ impl App {
         lines.extend([
             Line::raw(""),
             help_group("Navigation"),
-            help_kv("Tab / S-Tab", "cycle focus (incl. follow-all)"),
+            help_kv("Tab / Shift-Tab", "cycle focus (incl. follow-all)"),
             help_kv("1 2 3 4 5", "show / hide panes & events"),
             help_kv("←↓↑→  j k", "move selection (rows)"),
             help_kv("← →  ·  ↑ ↓", "chart: scrub cursor · zoom time axis"),
-            help_kv("g / G  ·  f", "follow latest / oldest · follow"),
+            help_kv("g / G", "jump to latest / oldest"),
+            help_kv("t", "tail latest"),
             help_kv("Enter", "open detail (Esc closes)"),
             Line::raw(""),
             help_group("Display"),
             help_kv("p", "pause / resume"),
             help_kv("/", "filter focused pane"),
+            help_kv("f", "show flagged rows in focused pane"),
             help_kv("e", "export this session to ./<id>.tracce.tgz"),
             help_kv("s", "switch session (back to the picker)"),
             Line::raw(""),
             help_group("Activity glyphs"),
             help_legend("R read  W write  C create  X close  D delete"),
             help_legend("M move  E edit  A multi-edit  $ bash  ⚠ sensitive"),
+            Line::raw(""),
+            help_group("Flag severity"),
+            help_legend("! warning (yellow)  ‼ critical (red)"),
+            help_legend("Edit patterns in ~/.tracce/flags.json"),
             Line::raw(""),
             help_group("General"),
             help_kv("h / ? / F1", "toggle this help"),
@@ -1350,6 +1414,36 @@ fn op_name(op: char) -> &'static str {
     }
 }
 
+/// Glyph for a row's user-flag severity: none, warning, or critical.
+fn severity_glyph(sev: Option<Severity>) -> &'static str {
+    match sev {
+        Some(Severity::Critical) => "‼",
+        Some(Severity::Warning) => "!",
+        None => " ",
+    }
+}
+
+/// Background tint for a row's user-flag severity, applied as the whole
+/// ListItem's style so unselected flagged rows get a colored background band.
+/// (The selection highlight always wins over this on the selected row — see
+/// the flagged-commands design doc.)
+fn severity_style(sev: Option<Severity>) -> Style {
+    match sev {
+        Some(Severity::Critical) => Style::default().bg(Color::Red).fg(Color::White),
+        Some(Severity::Warning) => Style::default().bg(Color::Yellow).fg(Color::Black),
+        None => Style::default(),
+    }
+}
+
+/// Human-readable severity for the detail modal.
+fn severity_label(sev: Option<Severity>) -> String {
+    match sev {
+        Some(Severity::Critical) => "‼ critical".into(),
+        Some(Severity::Warning) => "! warning".into(),
+        None => "none".into(),
+    }
+}
+
 /// Dim every cell in `area` so a modal reads as a focused overlay. Runs after
 /// the main UI is drawn but before the modal, which then overwrites (un-dims)
 /// its own footprint via `Clear`.
@@ -1434,7 +1528,7 @@ fn help_group(name: &str) -> Line<'static> {
 fn help_kv(key: &str, desc: &str) -> Line<'static> {
     Line::from(vec![
         Span::raw("  "),
-        Span::styled(format!("{key:<14}"), Style::default().fg(Color::Yellow)),
+        Span::styled(format!("{key:<18}"), Style::default().fg(Color::Yellow)),
         Span::styled(desc.to_string(), Style::default().fg(Color::Gray)),
     ])
 }
@@ -1530,8 +1624,16 @@ fn wrap_text(s: &str, width: usize) -> Vec<String> {
     lines
 }
 
+/// Truncate `s` to at most `n` characters, first collapsing embedded
+/// newlines/carriage returns to spaces. Every caller feeds a single `List`
+/// row: ratatui's `Text` splits raw content on `\n` into multiple `Line`s,
+/// which would silently expand that one row into two, smearing its
+/// background style (including our severity tint) onto whatever renders on
+/// the next display row. Argv and file paths routinely contain literal `\n`
+/// (e.g. a multi-line `bash -c "..."` script), so this isn't hypothetical.
 fn truncate(s: &str, n: usize) -> String {
-    if s.len() <= n { s.to_string() } else {
+    let s = s.replace(['\n', '\r'], " ");
+    if s.len() <= n { s } else {
         let mut t = s.chars().rev().take(n.saturating_sub(1)).collect::<String>();
         t = t.chars().rev().collect();
         format!("…{t}")
@@ -1545,6 +1647,10 @@ mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     fn test_app() -> App {
+        test_app_with(FlagConfig::empty())
+    }
+
+    fn test_app_with(flags: FlagConfig) -> App {
         let meta = Meta {
             session_id: "test".into(),
             started_at: chrono::Utc::now(),
@@ -1563,7 +1669,7 @@ mod tests {
             status: "replay".into(),
             events_path: PathBuf::from("/tmp/events.jsonl"),
         };
-        App::new(entry)
+        App::new(entry, flags)
     }
 
     fn key(c: char) -> KeyEvent { KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE) }
@@ -1642,6 +1748,7 @@ mod tests {
                 ppid: if pid == 1 { 0 } else { 1 },
                 event_count: 0,
                 last_ts_ns: 0,
+                severity: None,
             });
         }
         assert!(app.focus.is_none(), "test relies on follow-all (no selection)");
@@ -1690,14 +1797,38 @@ mod tests {
     }
 
     #[test]
-    fn f_returns_focused_pane_to_follow() {
+    fn t_returns_focused_pane_to_tail() {
         let mut app = test_app();
         app.focus = Some(Pane::Commands);
-        app.commands = vec![CommandRow { pid: 1, argv: "a".into(), ts_ns: 0 }];
+        app.commands = vec![CommandRow { pid: 1, argv: "a".into(), ts_ns: 0, severity: None }];
         app.handle_key(code(KeyCode::Down));
         assert_eq!(app.focus_selected(), Some(0));
-        app.handle_key(key('f'));
+        app.handle_key(key('t'));
         assert_eq!(app.focus_selected(), None);
+    }
+
+    #[test]
+    fn f_toggles_flagged_rows_in_focused_pane() {
+        let flags = crate::flags::build(vec!["*sudo*".to_string()], vec![]);
+        let mut app = test_app_with(flags);
+        app.focus = Some(Pane::Commands);
+        app.commands = vec![
+            CommandRow {
+                pid: 1,
+                argv: "sudo echo hi".into(),
+                ts_ns: 0,
+                severity: Some(Severity::Critical),
+            },
+            CommandRow { pid: 2, argv: "echo hi".into(), ts_ns: 0, severity: None },
+        ];
+
+        app.handle_key(key('f'));
+        assert!(app.flagged_only[pane_index(Pane::Commands)]);
+        assert_eq!(app.filtered_commands().len(), 1);
+
+        app.handle_key(key('f'));
+        assert!(!app.flagged_only[pane_index(Pane::Commands)]);
+        assert_eq!(app.filtered_commands().len(), 2);
     }
 
     #[test]
@@ -1705,8 +1836,8 @@ mod tests {
         let mut app = test_app();
         app.focus = Some(Pane::Commands);
         app.commands = vec![
-            CommandRow { pid: 1, argv: "rg foo".into(), ts_ns: 0 },
-            CommandRow { pid: 2, argv: "ls -la".into(), ts_ns: 0 },
+            CommandRow { pid: 1, argv: "rg foo".into(), ts_ns: 0, severity: None },
+            CommandRow { pid: 2, argv: "ls -la".into(), ts_ns: 0, severity: None },
         ];
         // Enter filter mode, type "rg", commit.
         app.handle_key(key('/'));
@@ -1822,6 +1953,274 @@ mod tests {
     }
 
     #[test]
+    fn embedded_newline_in_argv_does_not_bleed_into_the_row_below() {
+        // A command whose argv contains a literal '\n' (e.g. a multi-line
+        // `bash -c "..."` script) used to expand its ListItem to 2 physical
+        // rows (ratatui's Text splits raw content on '\n'), smearing that
+        // row's background style onto whatever rendered directly below it.
+        // `truncate()` now collapses embedded newlines to spaces first, so
+        // every COMMANDS row stays exactly one physical row.
+        use crate::event::{Event, EventData, EventKind, ProcessRef};
+        use std::sync::Arc;
+
+        let mut app = test_app();
+        app.ingest(Event {
+            ts_ns: 1, kind: EventKind::Exec, pid: 66, ppid: 1,
+            process: Arc::new(ProcessRef {
+                pid: 66, comm: "echo".into(), image: PathBuf::from("/bin/echo"),
+                argv: vec!["echo".into(), "second-command".into()],
+            }),
+            data: EventData::Exec {
+                argv: vec!["echo".into(), "second-command".into()],
+                image: PathBuf::from("/bin/echo"),
+            },
+            flags: 0,
+        });
+        app.ingest(Event {
+            ts_ns: 2, kind: EventKind::Exec, pid: 55, ppid: 1,
+            process: Arc::new(ProcessRef {
+                pid: 55, comm: "bash".into(), image: PathBuf::from("/bin/bash"),
+                argv: vec!["bash".into(), "-c".into(), "echo one\necho two".into()],
+            }),
+            data: EventData::Exec {
+                argv: vec!["bash".into(), "-c".into(), "echo one\necho two".into()],
+                image: PathBuf::from("/bin/bash"),
+            },
+            flags: 0,
+        });
+        // Newest-first: commands[0] is the multi-line one (pid 55), rendered
+        // at the top row; commands[1] (pid 66) is directly below it.
+        assert_eq!(app.commands[0].pid, 55);
+        assert_eq!(app.commands[1].pid, 66);
+
+        let backend = ratatui::backend::TestBackend::new(60, 6);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        term.draw(|f| app.draw_commands(f, f.area())).unwrap();
+        let buf = term.backend().buffer();
+        let row_text = |y: u16| -> String {
+            (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect()
+        };
+        // Row 2 is the top data row (row 0 = border+title, row 1 = header).
+        let top_row = row_text(2);
+        let next_row = row_text(3);
+
+        assert!(
+            top_row.contains("echo one") && top_row.contains("echo two"),
+            "expected both halves of the newline-joined argv on ONE row, got: {top_row:?}"
+        );
+        assert!(
+            next_row.contains("second-command"),
+            "expected pid 66's command directly below, got: {next_row:?}"
+        );
+        assert!(
+            !next_row.contains("echo two"),
+            "the multi-line command's tail leaked onto the row below: {next_row:?}"
+        );
+    }
+
+    #[test]
+    fn duplicate_root_exec_is_not_added_twice() {
+        use crate::event::{Event, EventData, EventKind, ProcessRef};
+        use std::sync::Arc;
+
+        let mut app = test_app();
+        app.session.meta.claude_pid = 55;
+        let root_exec = |ts_ns| Event {
+            ts_ns,
+            kind: EventKind::Exec,
+            pid: 55,
+            ppid: 1,
+            process: Arc::new(ProcessRef {
+                pid: 55,
+                comm: "bash".into(),
+                image: PathBuf::from("/bin/bash"),
+                argv: vec!["bash".into(), "-c".into(), "echo hi".into()],
+            }),
+            data: EventData::Exec {
+                argv: vec!["bash".into(), "-c".into(), "echo hi".into()],
+                image: PathBuf::from("/bin/bash"),
+            },
+            flags: 0,
+        };
+
+        // Synthetic root + eslogger root event: same PID/argv, milliseconds apart.
+        app.ingest(root_exec(1));
+        app.ingest(root_exec(1_000_000));
+        assert_eq!(app.commands.len(), 1);
+
+        // A genuinely later re-exec is still visible.
+        app.ingest(root_exec(ROOT_EXEC_DEDUP_WINDOW_NS + 2));
+        assert_eq!(app.commands.len(), 2);
+    }
+
+    #[test]
+    fn exec_command_matching_critical_pattern_is_flagged() {
+        use crate::event::{Event, EventData, EventKind, ProcessRef};
+        use std::sync::Arc;
+
+        let cfg = crate::flags::build(vec!["*sudo*".to_string()], vec![]);
+        let mut app = test_app_with(cfg);
+        let ev = Event {
+            ts_ns: 1,
+            kind: EventKind::Exec,
+            pid: 55,
+            ppid: 1,
+            process: Arc::new(ProcessRef {
+                pid: 55,
+                comm: "sudo".into(),
+                image: PathBuf::from("/usr/bin/sudo"),
+                argv: vec!["/usr/bin/sudo".into(), "rm".into(), "-rf".into(), "/tmp/x".into()],
+            }),
+            data: EventData::Exec {
+                argv: vec!["/usr/bin/sudo".into(), "rm".into(), "-rf".into(), "/tmp/x".into()],
+                image: PathBuf::from("/usr/bin/sudo"),
+            },
+            flags: 0,
+        };
+        app.ingest(ev);
+        assert_eq!(app.commands[0].severity, Some(Severity::Critical));
+        assert_eq!(app.processes[&55].severity, Some(Severity::Critical));
+    }
+
+    #[test]
+    fn file_event_matching_warning_pattern_is_flagged() {
+        use crate::event::{Event, EventData, EventKind, FileOp, ProcessRef};
+        use std::sync::Arc;
+
+        let cfg = crate::flags::build(vec![], vec!["*.env*".to_string()]);
+        let mut app = test_app_with(cfg);
+        let ev = Event {
+            ts_ns: 1,
+            kind: EventKind::Open,
+            pid: 9,
+            ppid: 1,
+            process: Arc::new(ProcessRef {
+                pid: 9, comm: "cat".into(), image: PathBuf::from("/bin/cat"), argv: vec![],
+            }),
+            data: EventData::File { op: FileOp::Open, path: PathBuf::from("/x/y/.env"), size: None },
+            flags: 0,
+        };
+        app.ingest(ev);
+        assert_eq!(app.recent_files[0].severity, Some(Severity::Warning));
+    }
+
+    #[test]
+    fn ingest_prefers_critical_over_warning_for_both_commands_and_files() {
+        use crate::event::{Event, EventData, EventKind, FileOp, ProcessRef};
+        use std::sync::Arc;
+
+        // Patterns overlap: "*sudo*" is both critical and warning; "*.env*" too.
+        let cfg = crate::flags::build(
+            vec!["*sudo*".to_string(), "*.env*".to_string()],
+            vec!["*sudo*".to_string(), "*.env*".to_string()],
+        );
+        let mut app = test_app_with(cfg);
+
+        app.ingest(Event {
+            ts_ns: 1, kind: EventKind::Exec, pid: 55, ppid: 1,
+            process: Arc::new(ProcessRef {
+                pid: 55, comm: "sudo".into(), image: PathBuf::from("/usr/bin/sudo"),
+                argv: vec!["/usr/bin/sudo".into(), "rm".into(), "-rf".into(), "/tmp/x".into()],
+            }),
+            data: EventData::Exec {
+                argv: vec!["/usr/bin/sudo".into(), "rm".into(), "-rf".into(), "/tmp/x".into()],
+                image: PathBuf::from("/usr/bin/sudo"),
+            },
+            flags: 0,
+        });
+        assert_eq!(app.commands[0].severity, Some(Severity::Critical));
+        assert_eq!(app.processes[&55].severity, Some(Severity::Critical));
+
+        app.ingest(Event {
+            ts_ns: 2, kind: EventKind::Open, pid: 9, ppid: 1,
+            process: Arc::new(ProcessRef {
+                pid: 9, comm: "cat".into(), image: PathBuf::from("/bin/cat"), argv: vec![],
+            }),
+            data: EventData::File { op: FileOp::Open, path: PathBuf::from("/x/y/.env"), size: None },
+            flags: 0,
+        });
+        assert_eq!(app.recent_files[0].severity, Some(Severity::Critical));
+    }
+
+    #[test]
+    fn flagged_rows_render_severity_glyph_and_background_color() {
+        use crate::event::{Event, EventData, EventKind, FileOp, ProcessRef};
+        use std::sync::Arc;
+
+        let cfg = crate::flags::build(
+            vec!["*sudo*".to_string()],
+            vec!["*.env*".to_string()],
+        );
+        let mut app = test_app_with(cfg);
+
+        app.ingest(Event {
+            ts_ns: 1, kind: EventKind::Exec, pid: 55, ppid: 1,
+            process: Arc::new(ProcessRef {
+                pid: 55, comm: "sudo".into(), image: PathBuf::from("/usr/bin/sudo"),
+                argv: vec!["/usr/bin/sudo".into(), "rm".into(), "-rf".into(), "/tmp/x".into()],
+            }),
+            data: EventData::Exec {
+                argv: vec!["/usr/bin/sudo".into(), "rm".into(), "-rf".into(), "/tmp/x".into()],
+                image: PathBuf::from("/usr/bin/sudo"),
+            },
+            flags: 0,
+        });
+        app.ingest(Event {
+            ts_ns: 2, kind: EventKind::Open, pid: 9, ppid: 1,
+            process: Arc::new(ProcessRef {
+                pid: 9, comm: "cat".into(), image: PathBuf::from("/bin/cat"), argv: vec![],
+            }),
+            data: EventData::File { op: FileOp::Open, path: PathBuf::from("/x/y/.env"), size: None },
+            flags: 0,
+        });
+
+        let backend = ratatui::backend::TestBackend::new(80, 12);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+
+        term.draw(|f| app.draw_commands(f, f.area())).unwrap();
+        let buf = term.backend().buffer();
+        let text: String = buf.content().iter().map(|c| c.symbol()).collect();
+        assert!(text.contains('‼'), "expected critical glyph in COMMANDS pane, got: {text}");
+        assert!(
+            buf.content().iter().any(|c| c.bg == Color::Red),
+            "expected a red-background cell in COMMANDS pane for the critical row"
+        );
+
+        term.draw(|f| app.draw_files(f, f.area())).unwrap();
+        let buf = term.backend().buffer();
+        let text: String = buf.content().iter().map(|c| c.symbol()).collect();
+        assert!(text.contains('!'), "expected warning glyph in ACTIVITY pane, got: {text}");
+        assert!(
+            buf.content().iter().any(|c| c.bg == Color::Yellow),
+            "expected a yellow-background cell in ACTIVITY pane for the warning row"
+        );
+
+        term.draw(|f| app.draw_processes(f, f.area())).unwrap();
+        let buf = term.backend().buffer();
+        let text: String = buf.content().iter().map(|c| c.symbol()).collect();
+        assert!(text.contains('‼'), "expected critical glyph in PROCESS TREE pane, got: {text}");
+    }
+
+    #[test]
+    fn unflagged_events_have_no_severity() {
+        use crate::event::{Event, EventData, EventKind, ProcessRef};
+        use std::sync::Arc;
+
+        let mut app = test_app(); // FlagConfig::empty()
+        let ev = Event {
+            ts_ns: 1, kind: EventKind::Exec, pid: 1, ppid: 0,
+            process: Arc::new(ProcessRef {
+                pid: 1, comm: "echo".into(), image: PathBuf::from("/bin/echo"), argv: vec!["/bin/echo".into()],
+            }),
+            data: EventData::Exec { argv: vec!["/bin/echo".into()], image: PathBuf::from("/bin/echo") },
+            flags: 0,
+        };
+        app.ingest(ev);
+        assert_eq!(app.commands[0].severity, None);
+        assert_eq!(app.processes[&1].severity, None);
+    }
+
+    #[test]
     fn wrap_text_breaks_on_spaces_and_hard_splits_long_tokens() {
         assert_eq!(wrap_text("a b c", 10), vec!["a b c"]);
         assert_eq!(wrap_text("hello world foo", 5), vec!["hello", "world", "foo"]);
@@ -1835,9 +2234,9 @@ mod tests {
         let mut app = test_app();
         app.focus = Some(Pane::Commands);
         app.commands = vec![
-            CommandRow { pid: 1, argv: "a".into(), ts_ns: 0 },
-            CommandRow { pid: 2, argv: "b".into(), ts_ns: 0 },
-            CommandRow { pid: 3, argv: "c".into(), ts_ns: 0 },
+            CommandRow { pid: 1, argv: "a".into(), ts_ns: 0, severity: None },
+            CommandRow { pid: 2, argv: "b".into(), ts_ns: 0, severity: None },
+            CommandRow { pid: 3, argv: "c".into(), ts_ns: 0, severity: None },
         ];
         assert_eq!(app.focus_selected(), None); // follow: no highlight
         app.handle_key(code(KeyCode::Down));
@@ -1854,7 +2253,7 @@ mod tests {
     fn enter_opens_detail_and_esc_closes() {
         let mut app = test_app();
         app.focus = Some(Pane::Commands);
-        app.commands = vec![CommandRow { pid: 7, argv: "rg foo".into(), ts_ns: 0 }];
+        app.commands = vec![CommandRow { pid: 7, argv: "rg foo".into(), ts_ns: 0, severity: None }];
         app.handle_key(code(KeyCode::Enter));
         assert_eq!(app.mode, Mode::Detail);
         assert!(app.detail.is_some());
@@ -1879,8 +2278,8 @@ mod tests {
         let mut app = test_app();
         app.focus = Some(Pane::Commands);
         app.commands = vec![
-            CommandRow { pid: 1, argv: "old1".into(), ts_ns: 0 },
-            CommandRow { pid: 2, argv: "old2".into(), ts_ns: 0 },
+            CommandRow { pid: 1, argv: "old1".into(), ts_ns: 0, severity: None },
+            CommandRow { pid: 2, argv: "old2".into(), ts_ns: 0, severity: None },
         ];
         app.handle_key(code(KeyCode::Down));
         app.handle_key(code(KeyCode::Down)); // highlight "old2" at index 1
@@ -1921,7 +2320,7 @@ mod tests {
         std::fs::write(dir.join("meta.json"), format!(r#"{{"session_id":"{id}","started_at":"2026-05-28T22:04:31Z","ended_at":null,"cwd":"/tmp/demo","argv":["claude"],"claude_pid":1,"tracer_pid":2,"hostname":"h","macos_version":"15","tracce_version":"0.1"}}"#)).unwrap();
         let entry = crate::view::discovery::entry_for_dir(&dir).unwrap();
 
-        let mut app = App::new(entry);
+        let mut app = App::new(entry, FlagConfig::empty());
         // Export writes the default ./<id>.tracce.tgz into cwd; point cwd at tmp
         // so the artifact lands there and is cleaned up with the TempDir. cwd is
         // process-global and tests run in parallel, so a CwdGuard restores it
