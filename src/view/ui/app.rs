@@ -37,7 +37,8 @@ const LOGO: [&str; 6] = [
 pub enum Pane { Process, File, Commands, Network, Events }
 
 /// Panes in display + toggle order. Index here is the `1`..`5` key and the
-/// position in `App::visible` / `App::filters` / `App::list_state`. `Events` is
+/// position in `App::visible` / `App::filters` / `App::flagged_only` /
+/// `App::list_state`. `Events` is
 /// the full-width EVENTS/s chart band; it's focusable but has no filter or rows
 /// (its `list_state` selection is reused as the scrub cursor).
 const PANE_ORDER: [Pane; 5] = [Pane::Process, Pane::File, Pane::Commands, Pane::Network, Pane::Events];
@@ -79,6 +80,9 @@ pub struct App {
     /// Committed per-pane substring filter (lowercased compare), "" = no filter.
     /// `Events` has no filter (its slot stays empty).
     filters: [String; 5],
+    /// Per-pane flag-only filters. When set, row panes show only rows with a
+    /// warning or critical severity; Network and Events do not support it.
+    flagged_only: [bool; 5],
     /// Live text being typed while in `Mode::Filter`, not yet committed.
     filter_draft: String,
     /// Per-pane list selection + viewport. `selected == None` means "follow the
@@ -131,6 +135,7 @@ impl App {
             mode: Mode::Normal,
             visible: [true; 5],
             filters: std::array::from_fn(|_| String::new()),
+            flagged_only: [false; 5],
             filter_draft: String::new(),
             list_state: std::array::from_fn(|_| ListState::default()),
             detail: None,
@@ -211,6 +216,10 @@ impl App {
                         self.filters[pane_index(p)].clear();
                         self.clamp_selection();
                     }
+                    Some(p) if self.flagged_only[pane_index(p)] => {
+                        self.flagged_only[pane_index(p)] = false;
+                        self.clamp_selection();
+                    }
                     _ => self.mode = Mode::QuitConfirm,
                 }
             }
@@ -231,8 +240,8 @@ impl App {
                     }
                 }
             }
-            // `f` drops the focused pane's highlight back to follow-latest.
-            (KeyCode::Char('f'), _) => self.sel_follow(),
+            // `f` toggles the focused pane to flagged rows only.
+            (KeyCode::Char('f'), _) => self.toggle_flagged_only(),
             (KeyCode::Tab, _) => self.cycle_focus(1),
             (KeyCode::BackTab, _) => self.cycle_focus(-1),
             (KeyCode::Char('1'), _) => self.toggle_visible(Pane::Process),
@@ -254,6 +263,7 @@ impl App {
             (KeyCode::Right, _) => self.sel_move(if self.focus == Some(Pane::Events) { -1 } else { 1 }),
             (KeyCode::PageDown, _)                        => self.sel_move(10),
             (KeyCode::PageUp, _)                          => self.sel_move(-10),
+            (KeyCode::Char('t'), _)                        => self.sel_follow(),
             (KeyCode::Char('g'), _) | (KeyCode::Home, _)  => self.sel_follow(),
             (KeyCode::Char('G'), _) | (KeyCode::End, _)   => self.sel_end(),
             (KeyCode::Enter, _)                           => self.open_detail(),
@@ -288,6 +298,16 @@ impl App {
     }
 
     fn pane_filter(&self, p: Pane) -> &str { &self.filters[pane_index(p)] }
+
+    fn pane_flagged_only(&self, p: Pane) -> bool { self.flagged_only[pane_index(p)] }
+
+    fn toggle_flagged_only(&mut self) {
+        let Some(p) = self.focus else { return };
+        if !matches!(p, Pane::Process | Pane::File | Pane::Commands) { return; }
+        let i = pane_index(p);
+        self.flagged_only[i] = !self.flagged_only[i];
+        self.clamp_selection();
+    }
 
     /// Number of selectable items in the focused pane (0 if no pane is focused).
     /// For `Events` this is the number of displayed bars at the current zoom —
@@ -339,7 +359,7 @@ impl App {
         st.select(next);
     }
 
-    /// `f` / `g` / Home: resume following the latest (drop the highlight/cursor).
+    /// `t` / `g` / Home: resume tailing the latest (drop the highlight/cursor).
     fn sel_follow(&mut self) {
         if let Some(p) = self.focus {
             self.list_state[pane_index(p)].select(None);
@@ -374,7 +394,7 @@ impl App {
     /// index shift is unreliable).
     fn glue_selection(&mut self, pane: Pane, len: usize) {
         let i = pane_index(pane);
-        if !self.filters[i].is_empty() { return; }
+        if !self.filters[i].is_empty() || self.flagged_only[i] { return; }
         if let Some(sel) = self.list_state[i].selected() {
             self.list_state[i].select(Some((sel + 1).min(len.saturating_sub(1))));
         }
@@ -536,22 +556,27 @@ impl App {
     }
 
     // --- filtered views ---------------------------------------------------
-    // Each returns the rows a pane should display given its committed filter.
+    // Each returns the rows a pane should display given its committed text and
+    // flag-only filters.
     // focus_len() and the draw_* methods share these so scrolling stays in sync.
 
     fn filtered_files(&self) -> Vec<&FileRow> {
         let f = self.pane_filter(Pane::File).to_lowercase();
         self.recent_files.iter().filter(|r| {
-            f.is_empty()
+            (!self.pane_flagged_only(Pane::File) || r.severity.is_some())
+                && (f.is_empty()
                 || r.comm.to_lowercase().contains(&f)
-                || r.path.display().to_string().to_lowercase().contains(&f)
+                || r.path.display().to_string().to_lowercase().contains(&f))
         }).collect()
     }
 
     fn filtered_commands(&self) -> Vec<&CommandRow> {
         let f = self.pane_filter(Pane::Commands).to_lowercase();
         self.commands.iter()
-            .filter(|c| f.is_empty() || c.argv.to_lowercase().contains(&f))
+            .filter(|c| {
+                (!self.pane_flagged_only(Pane::Commands) || c.severity.is_some())
+                    && (f.is_empty() || c.argv.to_lowercase().contains(&f))
+            })
             .collect()
     }
 
@@ -570,11 +595,14 @@ impl App {
     /// pid-sorted list of matching processes (connectors would dangle).
     fn filtered_proc_rows(&self) -> Vec<(u32, String)> {
         let f = self.pane_filter(Pane::Process).to_lowercase();
-        if f.is_empty() {
+        if f.is_empty() && !self.pane_flagged_only(Pane::Process) {
             return build_tree_rows(&self.processes);
         }
         let mut v: Vec<(u32, String)> = self.processes.values()
-            .filter(|p| p.comm.to_lowercase().contains(&f))
+            .filter(|p| {
+                (!self.pane_flagged_only(Pane::Process) || p.severity.is_some())
+                    && (f.is_empty() || p.comm.to_lowercase().contains(&f))
+            })
             .map(|p| (p.pid, String::new()))
             .collect();
         v.sort_by_key(|(pid, _)| *pid);
@@ -1126,6 +1154,12 @@ impl App {
                 Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
             ));
         }
+        if self.pane_flagged_only(pane) {
+            spans.push(Span::styled(
+                "[flags] ",
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            ));
+        }
         Line::from(spans)
     }
 
@@ -1157,8 +1191,8 @@ impl App {
         let label_style = Style::default().fg(Color::Gray);
         let mut spans: Vec<Span> = Vec::new();
         for (k, label) in [
-            ("Tab", "focus"), ("1-5", "show"), ("↵", "detail"), ("f", "follow"),
-            ("/", "filter"), ("p", "pause"), ("e", "export"), ("s", "switch"),
+            ("Tab", "focus"), ("1-5", "show"), ("↵", "detail"), ("t", "tail"),
+            ("f", "flags"), ("/", "filter"), ("p", "pause"), ("e", "export"), ("s", "switch"),
             ("h", "help"), ("q", "quit"),
         ] {
             spans.push(Span::styled(format!(" {k} "), key_style));
@@ -1182,12 +1216,13 @@ impl App {
             help_kv("1 2 3 4 5", "show / hide panes & events"),
             help_kv("←↓↑→  j k", "move selection (rows)"),
             help_kv("← →  ·  ↑ ↓", "chart: scrub cursor · zoom time axis"),
-            help_kv("g / G  ·  f", "follow latest / oldest · follow"),
+            help_kv("g / G  ·  t", "follow latest / oldest · tail"),
             help_kv("Enter", "open detail (Esc closes)"),
             Line::raw(""),
             help_group("Display"),
             help_kv("p", "pause / resume"),
             help_kv("/", "filter focused pane"),
+            help_kv("f", "show flagged rows in focused pane"),
             help_kv("e", "export this session to ./<id>.tracce.tgz"),
             help_kv("s", "switch session (back to the picker)"),
             Line::raw(""),
@@ -1760,14 +1795,38 @@ mod tests {
     }
 
     #[test]
-    fn f_returns_focused_pane_to_follow() {
+    fn t_returns_focused_pane_to_tail() {
         let mut app = test_app();
         app.focus = Some(Pane::Commands);
         app.commands = vec![CommandRow { pid: 1, argv: "a".into(), ts_ns: 0, severity: None }];
         app.handle_key(code(KeyCode::Down));
         assert_eq!(app.focus_selected(), Some(0));
-        app.handle_key(key('f'));
+        app.handle_key(key('t'));
         assert_eq!(app.focus_selected(), None);
+    }
+
+    #[test]
+    fn f_toggles_flagged_rows_in_focused_pane() {
+        let flags = crate::flags::build(vec!["*sudo*".to_string()], vec![]);
+        let mut app = test_app_with(flags);
+        app.focus = Some(Pane::Commands);
+        app.commands = vec![
+            CommandRow {
+                pid: 1,
+                argv: "sudo echo hi".into(),
+                ts_ns: 0,
+                severity: Some(Severity::Critical),
+            },
+            CommandRow { pid: 2, argv: "echo hi".into(), ts_ns: 0, severity: None },
+        ];
+
+        app.handle_key(key('f'));
+        assert!(app.flagged_only[pane_index(Pane::Commands)]);
+        assert_eq!(app.filtered_commands().len(), 1);
+
+        app.handle_key(key('f'));
+        assert!(!app.flagged_only[pane_index(Pane::Commands)]);
+        assert_eq!(app.filtered_commands().len(), 2);
     }
 
     #[test]
