@@ -1202,7 +1202,7 @@ impl App {
     }
 
     fn draw_help(&self, f: &mut Frame, area: Rect) {
-        let rect = centered_fixed(58, 37, area);
+        let rect = centered_fixed(80, 37, area);
         let block = modal_block(" keybindings ");
         let inner = block.inner(rect);
         f.render_widget(Clear, rect);
