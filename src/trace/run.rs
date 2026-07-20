@@ -1,9 +1,10 @@
 use crate::event::{Event, EventData, EventKind, ProcessRef};
 use crate::trace::{
     aggregator::Aggregator,
-    claude_transcript, eslogger, network,
+    claude_transcript, codex_transcript, eslogger, network,
     persist::Persist,
     pid_tree::{self, PidTree},
+    provider::Provider,
     session::{Session, SessionStatus},
 };
 use anyhow::{anyhow, Context, Result};
@@ -35,9 +36,9 @@ const ESLOGGER_EVENTS: &[&str] = &[
 ];
 
 /// Launch a command, record it, and exit when it does. No TUI — the wrapped
-/// command owns the terminal (this is the `tracce` / `tracce claude` / `tracce
-/// exec` path). To watch a running claude live instead, see `attach`.
-pub fn run(argv: Vec<String>, root: PathBuf) -> Result<i32> {
+/// command owns the terminal (this is the `tracce claude` / `tracce codex` /
+/// `tracce exec` path). To watch a running agent live instead, see `attach`.
+pub fn run(argv: Vec<String>, provider: Provider, root: PathBuf) -> Result<i32> {
     if argv.is_empty() {
         return Err(anyhow!("trace requires a command"));
     }
@@ -46,7 +47,7 @@ pub fn run(argv: Vec<String>, root: PathBuf) -> Result<i32> {
     let tracer_pid = std::process::id();
 
     // Raw events channel — shared by eslogger (if active), the tree poller,
-    // the network poller, and the claude transcript tailer.
+    // the network poller, and the selected provider's intent tailer.
     let (raw_tx, raw_rx) = mpsc::sync_channel::<Event>(RAW_CHAN_CAP);
 
     // Bring eslogger up BEFORE spawning the wrapped child so the Endpoint
@@ -65,7 +66,7 @@ pub fn run(argv: Vec<String>, root: PathBuf) -> Result<i32> {
         .with_context(|| format!("spawn {:?}", argv[0]))?;
     let child_pid = child.id();
 
-    let session = Session::create(&root, child_pid, tracer_pid, &argv, &cwd)?;
+    let session = Session::create(&root, provider, child_pid, tracer_pid, &argv, &cwd)?;
     eprintln!("tracce · recording to {}", session.dir().display());
 
     let mut tree = PidTree::new(child_pid);
@@ -76,7 +77,7 @@ pub fn run(argv: Vec<String>, root: PathBuf) -> Result<i32> {
 
     let persist = Arc::new(Persist::open(&session.events_path())?);
     let (net_handle, tree_poll_handle, transcript_handle) =
-        start_poll_sources(child_pid, &cwd, eslogger_active, &agg, &raw_tx)?;
+        start_poll_sources(provider, child_pid, &cwd, eslogger_active, &agg, &raw_tx)?;
 
     let (aggregator_handle, persist_handle) = spawn_pipeline(agg, persist, raw_rx);
 
@@ -166,7 +167,7 @@ pub(crate) fn bring_up_eslogger(raw_tx: SyncSender<Event>) -> (Option<ThreadStop
 
 fn print_degrade_banner() {
     eprintln!("tracce · eslogger unavailable (sudo declined or failed to start)");
-    eprintln!("tracce · running poll-only: process tree + network + claude tool calls.");
+    eprintln!("tracce · running poll-only: process tree + network + agent tool calls.");
     eprintln!("         file open/write/delete events OFF.");
 }
 
@@ -207,10 +208,10 @@ pub(crate) fn emit_synthetic_root_exec(
 
 /// Start the poll-based sources that run regardless of mode. The tree poller is
 /// started ONLY when eslogger is inactive, so it never clobbers eslogger's rich
-/// exec argv with bare `ps` basenames. The transcript tailer always runs — it
-/// captures claude's intent (which tool, exact Bash command), a different data
-/// class that doesn't collide with kernel events.
+/// exec argv with bare `ps` basenames. The selected provider's intent tailer
+/// runs independently of eslogger because it is a different data class.
 pub(crate) fn start_poll_sources(
+    provider: Provider,
     root_pid: u32,
     cwd: &std::path::Path,
     eslogger_active: bool,
@@ -229,16 +230,30 @@ pub(crate) fn start_poll_sources(
         None
     };
 
-    let transcript_handle = match claude_transcript::start_transcript_thread(
-        root_pid,
-        cwd.to_path_buf(),
-        raw_tx.clone(),
-    ) {
-        Ok(h) => Some(h),
-        Err(e) => {
-            eprintln!("tracce · claude transcript tailer failed to start: {e}");
-            None
-        }
+    let transcript_handle = match provider {
+        Provider::Claude => match claude_transcript::start_transcript_thread(
+            root_pid,
+            cwd.to_path_buf(),
+            raw_tx.clone(),
+        ) {
+            Ok(h) => Some(h),
+            Err(e) => {
+                eprintln!("tracce · Claude transcript unavailable: {e}");
+                None
+            }
+        },
+        Provider::Codex => match codex_transcript::start_transcript_thread(
+            root_pid,
+            cwd.to_path_buf(),
+            raw_tx.clone(),
+        ) {
+            Ok(h) => Some(h),
+            Err(e) => {
+                eprintln!("tracce · Codex session history unavailable: {e}");
+                None
+            }
+        },
+        Provider::Other => None,
     };
 
     Ok((net_handle, tree_poll_handle, transcript_handle))

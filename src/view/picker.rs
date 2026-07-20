@@ -200,9 +200,10 @@ fn draw(f: &mut Frame, entries: &[SessionEntry], counts: &[usize], state: &mut L
             Line::raw(""),
             // Keep the tail of the path (the project) rather than the /Users prefix.
             kv("cwd", Span::styled(front_trunc(&e.meta.cwd.display().to_string(), dv), gray())),
+            kv("agent", Span::styled(e.meta.provider.to_string(), gray())),
             kv("command", Span::styled(trunc(&cmd, dv), gray())),
             kv("session", Span::styled(trunc(&e.meta.session_id, dv), gray())),
-            kv("pid", Span::styled(e.meta.claude_pid.to_string(), gray())),
+            kv("pid", Span::styled(e.meta.root_pid.to_string(), gray())),
             kv("host", Span::styled(e.meta.hostname.clone(), gray())),
         ];
         f.render_widget(Paragraph::new(lines), dinner);
@@ -283,7 +284,6 @@ fn count_lines(p: &Path) -> std::io::Result<usize> {
     let f = std::fs::File::open(p)?;
     Ok(BufReader::new(f).lines().count())
 }
-
 
 
 

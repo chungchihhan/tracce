@@ -1,4 +1,5 @@
 use tracce::view::discovery::{discover, SessionEntry};
+use tracce::trace::provider::Provider;
 use tempfile::TempDir;
 
 fn touch_session(root: &std::path::Path, id: &str, status: &str, started: &str) {
@@ -89,7 +90,7 @@ fn app_ingests_events_into_panes() {
             ended_at: None,
             cwd: "/tmp".into(),
             argv: vec!["claude".into()],
-            claude_pid: 1, tracer_pid: 2,
+            provider: Provider::Claude, root_pid: 1, tracer_pid: 2,
             hostname: "h".into(), macos_version: "15".into(), tracce_version: "0.1".into(),
         },
         status: "live".into(),

@@ -672,7 +672,7 @@ impl App {
                 // basenamed command as argv[0]) or a real argv array (eslogger).
                 // Joining with spaces works for both shapes.
                 let joined = argv.join(" ");
-                let duplicate_root_exec = ev.pid == self.session.meta.claude_pid
+                let duplicate_root_exec = ev.pid == self.session.meta.root_pid
                     && self.commands.iter().any(|row| {
                         row.pid == ev.pid
                             && row.argv == joined
@@ -831,8 +831,9 @@ impl App {
         };
         let status = Line::from(vec![
             Span::styled("tracce ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-            Span::raw("· "), live_span,
-            Span::raw(format!(" · {id} · uptime {}", self.uptime_str())),
+            Span::raw("· "),
+            live_span,
+            Span::raw(format!(" · {} · {id} · uptime {}", self.session.meta.provider, self.uptime_str())),
             pause_span,
             Span::raw("    events "),
             Span::styled(format!("{}", self.events.len()), Style::default().add_modifier(Modifier::BOLD)),
@@ -1657,7 +1658,8 @@ mod tests {
             ended_at: None,
             cwd: PathBuf::from("/tmp"),
             argv: vec![],
-            claude_pid: 0,
+            provider: crate::trace::provider::Provider::Claude,
+            root_pid: 0,
             tracer_pid: 0,
             hostname: "h".into(),
             macos_version: "x".into(),
@@ -2024,7 +2026,7 @@ mod tests {
         use std::sync::Arc;
 
         let mut app = test_app();
-        app.session.meta.claude_pid = 55;
+        app.session.meta.root_pid = 55;
         let root_exec = |ts_ns| Event {
             ts_ns,
             kind: EventKind::Exec,

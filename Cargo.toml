@@ -2,7 +2,7 @@
 name = "tracce"
 version = "0.2.0"
 edition = "2021"
-description = "macOS kernel-event tracer for Claude Code sessions"
+description = "macOS kernel-event tracer for Claude Code and Codex sessions"
 license = "MIT"
 rust-version = "1.75"
 
