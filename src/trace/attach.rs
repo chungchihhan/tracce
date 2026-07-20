@@ -1,4 +1,4 @@
-//! Attach to an already-running claude and render the live TUI.
+//! Attach to an already-running Claude or Codex process and render the live TUI.
 //!
 //! Unlike `run` (which launches the command and owns nothing but a child
 //! handle), attach hooks onto an existing pid. Because claude is in its own
@@ -15,6 +15,7 @@ use crate::trace::{
     claude_transcript,
     persist::Persist,
     pid_tree::PidTree,
+    provider::Provider,
     run,
     session::{Session, SessionStatus},
 };
@@ -31,9 +32,14 @@ use std::time::{Duration, SystemTime};
 const RAW_CHAN_CAP: usize = 4096;
 const FLUSH_INTERVAL: Duration = Duration::from_millis(250);
 
-pub fn run(pid: Option<u32>, root: &Path) -> Result<()> {
-    let target_pid = select_pid(pid)?;
-    let command = proc_command(target_pid).unwrap_or_else(|| "claude".to_string());
+pub fn run(agent: Option<Provider>, pid: Option<u32>, root: &Path) -> Result<()> {
+    if agent == Some(Provider::Other) {
+        return Err(anyhow!("attach supports Claude or Codex, not arbitrary commands"));
+    }
+    let (target_pid, provider) = select_pid(agent, pid)?;
+    let command = proc_command(target_pid)
+        .or_else(|| provider.command().map(str::to_string))
+        .unwrap_or_else(|| "agent".to_string());
     let cwd = proc_cwd(target_pid)
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_default();
@@ -43,7 +49,7 @@ pub fn run(pid: Option<u32>, root: &Path) -> Result<()> {
     eprintln!("tracce · cwd {}", cwd.display());
 
     // Raw events channel — shared by eslogger (if active), the tree/network
-    // pollers, and the claude transcript tailer.
+    // pollers, and the selected provider's intent tailer.
     let (raw_tx, raw_rx) = mpsc::sync_channel::<Event>(RAW_CHAN_CAP);
 
     // Bring eslogger up (prints/sudo-prompts to stderr) BEFORE we enter the
@@ -61,7 +67,7 @@ pub fn run(pid: Option<u32>, root: &Path) -> Result<()> {
         }
     };
 
-    let session = Session::create(root, target_pid, tracer_pid, &argv, &cwd)?;
+    let session = Session::create(root, provider, target_pid, tracer_pid, &argv, &cwd)?;
     eprintln!("tracce · recording to {}", session.dir().display());
 
     let mut tree = PidTree::new(target_pid);
@@ -72,12 +78,12 @@ pub fn run(pid: Option<u32>, root: &Path) -> Result<()> {
 
     let persist = Arc::new(Persist::open(&session.events_path())?);
     let (net_handle, tree_poll_handle, transcript_handle) =
-        run::start_poll_sources(target_pid, &cwd, eslogger_active, &agg, &raw_tx)?;
+        run::start_poll_sources(provider, target_pid, &cwd, eslogger_active, &agg, &raw_tx)?;
     let flush_handle = run::start_flush_thread(persist.clone(), FLUSH_INTERVAL);
 
     let (aggregator_handle, persist_handle) = run::spawn_pipeline(agg, persist, raw_rx);
 
-    // Render the live session in the TUI until the user quits. claude keeps
+    // Render the live session in the TUI until the user quits. The agent keeps
     // running when we leave — we only detach.
     let entry = crate::view::discovery::entry_for_dir(session.dir())?;
     // `s` (switch session) is a no-op here: attach is tied to this one recording,
@@ -98,27 +104,37 @@ pub fn run(pid: Option<u32>, root: &Path) -> Result<()> {
 }
 
 /// Resolve which pid to attach to: an explicit pid (verified alive), the single
-/// running claude, or an interactive picker when several are running.
-fn select_pid(explicit: Option<u32>) -> Result<u32> {
+/// matching agent, or an interactive picker when several are running.
+fn select_pid(agent: Option<Provider>, explicit: Option<u32>) -> Result<(u32, Provider)> {
     if let Some(p) = explicit {
         if !pid_alive(p) {
             return Err(anyhow!("pid {p} is not running"));
         }
-        return Ok(p);
+        let provider = agent
+            .filter(|p| p.is_agent())
+            .or_else(|| proc_command(p).and_then(|s| provider_for_command(&s)))
+            .ok_or_else(|| anyhow!("could not identify pid {p} as Claude or Codex; use `--agent`"))?;
+        return Ok((p, provider));
     }
-    let found = find_claude_procs();
+    let found = find_agent_procs(agent);
     match found.len() {
         0 => Err(anyhow!(
-            "no running `claude` process found — start claude first, \
+            "no running Claude/Codex process found — start an agent first, \
              or attach to a specific pid: `tracce attach <pid>`"
         )),
-        1 => Ok(found[0].0),
+        1 => Ok((found[0].0, found[0].2)),
         _ => {
             let rows = enrich(found);
             let current_dir = std::env::current_dir()
                 .map(|p| p.display().to_string())
                 .unwrap_or_default();
             pick_process(rows, current_dir)?
+                .map(|pid| {
+                    let provider = proc_command(pid)
+                        .and_then(|s| provider_for_command(&s))
+                        .unwrap_or(Provider::Claude);
+                    (pid, provider)
+                })
                 .ok_or_else(|| anyhow!("no process selected"))
         }
     }
@@ -128,41 +144,51 @@ fn select_pid(explicit: Option<u32>) -> Result<u32> {
 /// the session id and name are what tell them apart.
 struct ProcRow {
     pid: u32,
+    provider: Provider,
     age: String,
     sid: String,
     name: String,
     cwd: String,
 }
 
-/// Decorate the bare `(pid, command)` candidates with cwd, uptime, session id,
+/// Decorate the bare `(pid, command, provider)` candidates with cwd, uptime, session id,
 /// and session name for display, in batched calls to lsof/ps.
-fn enrich(procs: Vec<(u32, String)>) -> Vec<ProcRow> {
-    let pids: Vec<u32> = procs.iter().map(|(p, _)| *p).collect();
+fn enrich(procs: Vec<(u32, String, Provider)>) -> Vec<ProcRow> {
+    let pids: Vec<u32> = procs.iter().map(|(p, _, _)| *p).collect();
     let cwds = cwds_for(&pids);
     let ages = ages_for(&pids);
     procs
         .into_iter()
-        .map(|(pid, command)| {
+        .map(|(pid, command, provider)| {
             let elapsed = ages.get(&pid).and_then(|e| parse_etime(e));
             let started = elapsed.and_then(|d| SystemTime::now().checked_sub(d));
             let age = elapsed.map(human_age).unwrap_or_else(|| "?".into());
             let cwd_path = cwds.get(&pid);
-            let sid = match (cwd_path, started) {
-                (Some(cwd), Some(start)) => {
-                    resolve_sid(cwd, &command, start).unwrap_or_else(|| "?".into())
+            let sid = if provider == Provider::Claude {
+                match (cwd_path, started) {
+                    (Some(cwd), Some(start)) => {
+                        resolve_sid(cwd, &command, start).unwrap_or_else(|| "?".into())
+                    }
+                    _ => "?".into(),
                 }
-                _ => "?".into(),
+            } else {
+                "?".into()
             };
             // Read the session name (first user prompt / summary) from the
             // matched transcript, when we have a real session id.
-            let name = match cwd_path {
-                Some(cwd) if sid != "?" => transcript_path(cwd, &sid)
-                    .and_then(|p| session_name(&p))
-                    .unwrap_or_default(),
-                _ => String::new(),
+            let name = if provider == Provider::Claude {
+                match cwd_path {
+                    Some(cwd) if sid != "?" => transcript_path(cwd, &sid)
+                        .and_then(|p| session_name(&p))
+                        .unwrap_or_default(),
+                    _ => String::new(),
+                }
+            } else {
+                String::new()
             };
             ProcRow {
                 pid,
+                provider,
                 age,
                 sid,
                 name,
@@ -256,7 +282,7 @@ fn human_age(d: Duration) -> String {
 /// we stop trusting the match (and show `?` instead of a possibly-wrong id).
 const SID_MATCH_WINDOW: Duration = Duration::from_secs(6 * 3600);
 
-/// Resolve a running claude's session id. First honors an explicit
+/// Resolve a running Claude session id. First honors an explicit
 /// `--resume <id>` in argv; otherwise matches the project dir's transcript
 /// whose birth time is closest to the process start (a fresh session writes its
 /// `<id>.jsonl` shortly after launch). Returns `None` when nothing is close
@@ -333,9 +359,9 @@ fn parse_etime(s: &str) -> Option<Duration> {
     Some(Duration::from_secs(days * 86_400 + h * 3_600 + m * 60 + sec))
 }
 
-/// Interactive picker for choosing among several running claude processes.
-/// Defaults to showing only claude(s) whose cwd matches `current_dir`; `a`
-/// toggles to show every running claude. Returns the chosen pid, or `None` if
+/// Interactive picker for choosing among several running Claude/Codex processes.
+/// Defaults to showing only agents whose cwd matches `current_dir`; `a`
+/// toggles to show every matching agent. Returns the chosen pid, or `None` if
 /// the user quit without selecting.
 fn pick_process(rows: Vec<ProcRow>, current_dir: String) -> Result<Option<u32>> {
     use crossterm::event::{self, Event as CtEvent, KeyCode};
@@ -424,6 +450,8 @@ fn pick_process(rows: Vec<ProcRow>, current_dir: String) -> Result<Option<u32>> 
                     let mut l1 = vec![
                         Span::styled(format!("pid {:<width$}", r.pid, width = GUTTER - 4), pid_s),
                         sep(),
+                        Span::styled(r.provider.label(), lbl_s),
+                        sep(),
                         Span::styled("Session ID", lbl_s),
                     ];
                     if has_name {
@@ -472,7 +500,7 @@ fn pick_process(rows: Vec<ProcRow>, current_dir: String) -> Result<Option<u32>> 
             };
             let block = Block::default()
                 .borders(Borders::ALL)
-                .title(format!(" tracce · attach to which claude?  [{scope}]  (↑/↓, Enter, q) "));
+                .title(format!(" tracce · attach to which agent?  [{scope}]  (↑/↓, Enter, q) "));
             let list = List::new(items)
                 .block(block)
                 .highlight_symbol("▸ ");
@@ -579,9 +607,9 @@ fn pid_alive(pid: u32) -> bool {
     kill(Pid::from_raw(pid as i32), None).is_ok()
 }
 
-/// Find running processes whose argv[0] basename is `claude`. Returns
-/// `(pid, full command line)`, excluding our own process.
-fn find_claude_procs() -> Vec<(u32, String)> {
+/// Find running processes whose argv[0] basename is a supported agent.
+/// Returns `(pid, full command line, provider)`, excluding our own process.
+fn find_agent_procs(filter: Option<Provider>) -> Vec<(u32, String, Provider)> {
     let out = match Command::new("/bin/ps")
         .args(["-A", "-o", "pid=,command="])
         .output()
@@ -610,11 +638,30 @@ fn find_claude_procs() -> Vec<(u32, String)> {
             .file_name()
             .and_then(|s| s.to_str())
             .unwrap_or(argv0);
-        if bn == "claude" {
-            v.push((pid, cmd.to_string()));
+        if let Some(provider) = provider_for_basename(bn) {
+            if filter.map(|wanted| wanted == provider).unwrap_or(true) {
+                v.push((pid, cmd.to_string(), provider));
+            }
         }
     }
     v
+}
+
+fn provider_for_basename(basename: &str) -> Option<Provider> {
+    match basename {
+        "claude" => Some(Provider::Claude),
+        "codex" | "codex-cli" => Some(Provider::Codex),
+        _ => None,
+    }
+}
+
+fn provider_for_command(command: &str) -> Option<Provider> {
+    let argv0 = command.split_whitespace().next()?;
+    let basename = Path::new(argv0)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(argv0);
+    provider_for_basename(basename)
 }
 
 #[cfg(test)]

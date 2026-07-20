@@ -1,11 +1,11 @@
 <div align="center">
 
-### `tracce` - See exactly what Claude Code does on your machine
+### `tracce` - See exactly what Claude Code and Codex do on your machine
 <img width="1624" height="1061" alt="image" src="https://github.com/user-attachments/assets/747303a2-9927-418b-aa63-98db200f5cd1" />
 <img width="1624" height="1061" alt="image" src="https://github.com/user-attachments/assets/3d194072-2048-467a-aa7f-87c53f5f0abf" />
 
-A macOS kernel-event tracer for Claude Code sessions — every process, file, and
-network connection, live in your terminal or replayed later.
+A macOS kernel-event tracer for Claude Code and Codex sessions — every process,
+file, and network connection, live in your terminal or replayed later.
 
 ![platform](https://img.shields.io/badge/platform-macOS%2013%2B-000000?logo=apple&logoColor=white)
 ![built with Rust](https://img.shields.io/badge/built%20with-Rust-CE412B?logo=rust&logoColor=white)
@@ -23,7 +23,7 @@ network connection, live in your terminal or replayed later.
 
 - **Live process tree** — every descendant of the traced process, with per-process event counts
 - **File activity** — opens, writes, creates, deletes, renames — with a `⚠` on sensitive paths (`.env`, `~/.ssh`, `*.pem`, …)
-- **Claude's intent, too** — reads Edit / Write / Read tool calls and the exact Bash command from the session transcript, shown next to kernel truth
+- **Agent intent, too** — reads supported Claude/Codex tool calls and commands from local session history, shown next to kernel truth when available
 - **Network** — remote hosts and their connection counts
 - **Events/s** — a live bar graph with a real time axis you can scrub and zoom
 - **Record & replay** — every session is written to JSONL, so you can `tracce view` it later
@@ -40,8 +40,9 @@ network connection, live in your terminal or replayed later.
 ```sh
 brew install chungchihhan/tap/tracce
 
-# Terminal A — start a Claude Code session, traced
+# Terminal A — start a traced agent
 tracce claude
+# or: tracce codex
 
 # Terminal B — watch it live (and replay anytime later)
 tracce view
@@ -82,27 +83,31 @@ sudo cp target/release/tracce /usr/local/bin/
 
 ## Usage
 
-The dashboard always runs in a second terminal — Claude Code is itself a TUI and
-can't share one. There are two ways to get there.
+The dashboard always runs in a second terminal — both Claude Code and Codex are
+terminal-first interfaces and can't share one with the board. There are two
+ways to get there.
 
-**Launch claude under tracce, watch with `view`** (recommended):
+**Launch Claude or Codex under tracce, watch with `view`** (recommended):
 
 ```sh
 # Terminal A — start a traced Claude Code session (claude owns this terminal)
 tracce claude
 tracce claude --print "explain this repo"
+# or:
+tracce codex
 
 # Terminal B — follow it live (auto-picks the live session)
 tracce view
 ```
 
-**Attach to a claude that's already running:**
+**Attach to an agent that's already running:**
 
 ```sh
 # Terminal B — sudo prompts once to start eslogger. With no pid, tracce finds
-# the running claude (or lets you pick if several are running).
+# a running Claude/Codex process (or lets you pick if several are running).
 tracce attach
 tracce attach <pid>
+tracce attach --agent codex
 ```
 
 **Replay & inspect recordings** — every run is saved, so `view` works after the fact too:
@@ -189,12 +194,12 @@ time you open or switch to a session — not live mid-session.
 ## How it works
 
 - Process and file events come from `/usr/bin/eslogger` (macOS Endpoint Security), on by default
-- claude's own tool calls (Edit/Write/Read, and the exact Bash command) are read from its session transcript and shown alongside the kernel events
+- supported Claude/Codex tool calls are read from local session history and shown alongside the kernel events when that history is available
 - Network connections come from `lsof -i` polled every 500 ms
 - Events are filtered to the descendant tree of the traced process
 - Bursts (e.g. ripgrep) are coalesced in the live view; raw events still go to JSONL
 - Sensitive paths (`.env`, `~/.aws`, `~/.ssh`, `*.pem`, etc.) get a `⚠` glyph
-- If eslogger can't start (sudo declined), tracce degrades to poll-only: process tree + network + claude tool calls, but no file open/write/delete events
+- If eslogger can't start (sudo declined), tracce degrades to poll-only: process tree + network + agent tool calls, but no file open/write/delete events
 
 ## Security & trust
 
@@ -231,14 +236,14 @@ exactly what that privilege buys and where it stops:
   function — `bring_up_eslogger` in `src/trace/run.rs`. Read it.
 
 - **You can decline.** Say no to the prompt and tracce degrades to poll-only
-  (process tree + network + claude tool calls), with no file events.
+  (process tree + network + agent tool calls), with no file events.
 
 ## Limitations
 
 - macOS only
 - Network bytes are approximations (poll-based, not kernel-traced)
 - Very short-lived connections (< 500 ms) may be missed
-- `attach` captures from the attach moment forward — it can't replay what claude did before you attached
+- `attach` captures from the attach moment forward — it can't replay what an agent did before you attached
 - Not a sandbox — tracce only observes
 
 ## License

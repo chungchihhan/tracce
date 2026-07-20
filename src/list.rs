@@ -3,7 +3,7 @@ use anyhow::Result;
 use std::path::Path;
 
 pub fn run(root: &Path) -> Result<()> {
-    println!("STATUS\tSTARTED\tCWD\tCLAUDE_PID\tEVENTS\tSESSION_ID");
+    println!("STATUS\tAGENT\tSTARTED\tCWD\tROOT_PID\tEVENTS\tSESSION_ID");
     let sessions_dir = root.join("sessions");
     if !sessions_dir.exists() {
         return Ok(());
@@ -34,11 +34,12 @@ pub fn run(root: &Path) -> Result<()> {
         let cwd_basename = r.meta.cwd.file_name()
             .and_then(|s| s.to_str()).unwrap_or("?");
         println!(
-            "{}\t{}\t{}\t{}\t{}\t{}",
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}",
             r.status,
+            r.meta.provider,
             r.meta.started_at.format("%Y-%m-%d %H:%M:%S"),
             cwd_basename,
-            r.meta.claude_pid,
+            r.meta.root_pid,
             r.events,
             r.meta.session_id,
         );

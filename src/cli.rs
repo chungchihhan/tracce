@@ -1,15 +1,17 @@
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
+use tracce::trace::provider::Provider;
+
 #[derive(Parser, Debug)]
 #[command(
     name = "tracce",
     version,
-    about = "macOS tracer for Claude Code sessions",
-    long_about = "Trace what a Claude Code session does on your machine.\n\n\
-                  Run `tracce` (or `tracce claude …`) to launch and record claude.\n\
+    about = "macOS tracer for Claude Code and Codex sessions",
+    long_about = "Trace what a Claude Code or Codex session does on your machine.\n\n\
+                  Run `tracce claude …` or `tracce codex …` to launch and record an agent.\n\
                   Run `tracce attach` in a second terminal to watch a running\n\
-                  claude live. Run `tracce view` to replay a recorded session."
+                  agent live. Run `tracce view` to replay a recorded session."
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -18,23 +20,32 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Cmd {
-    /// Launch and record a Claude Code session (this is the default when no
-    /// subcommand is given). claude owns the terminal, so no TUI is drawn —
-    /// replay the recording later with `tracce view`.
+    /// Launch and record a Claude Code session. Claude owns the terminal, so no
+    /// TUI is drawn — replay the recording later with `tracce view`.
     Claude {
         /// Arguments forwarded verbatim to `claude`.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
-    /// Attach to an already-running claude: record AND render the live TUI in
+    /// Launch and record a Codex CLI session. Codex owns the terminal, so no
+    /// TUI is drawn — replay the recording later with `tracce view`.
+    Codex {
+        /// Arguments forwarded verbatim to `codex`.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Attach to an already-running Claude or Codex: record AND render the live TUI in
     /// this terminal. The only mode that shows a live dashboard.
     Attach {
-        /// PID of the running claude. Omit to auto-find the running claude
-        /// (or pick from a list if several are running).
+        /// Restrict auto-discovery to one supported agent.
+        #[arg(long, value_enum)]
+        agent: Option<Provider>,
+        /// PID of the running agent. Omit to auto-find Claude/Codex (or pick
+        /// from a list if several are running).
         pid: Option<u32>,
     },
     /// Launch and record an arbitrary command — a testing hatch for exercising
-    /// tracce's features without claude in the loop. e.g. `tracce exec -- npm test`.
+    /// tracce's features without an agent in the loop. e.g. `tracce exec -- npm test`.
     Exec {
         /// The command and its arguments to trace.
         #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]

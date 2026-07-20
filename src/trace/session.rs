@@ -5,6 +5,8 @@ use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use super::provider::Provider;
+
 #[derive(Debug, Clone, Copy)]
 pub enum SessionStatus {
     Live,
@@ -29,7 +31,10 @@ pub struct Meta {
     pub ended_at: Option<DateTime<Utc>>,
     pub cwd: PathBuf,
     pub argv: Vec<String>,
-    pub claude_pid: u32,
+    #[serde(default)]
+    pub provider: Provider,
+    #[serde(alias = "claude_pid")]
+    pub root_pid: u32,
     pub tracer_pid: u32,
     pub hostname: String,
     pub macos_version: String,
@@ -59,7 +64,8 @@ impl Session {
 
     pub fn create(
         root: &Path,
-        claude_pid: u32,
+        provider: Provider,
+        root_pid: u32,
         tracer_pid: u32,
         argv: &[String],
         cwd: &Path,
@@ -69,7 +75,7 @@ impl Session {
             "{}_{}_{}",
             started_at.format("%Y-%m-%dT%H-%M-%S"),
             cwd.file_name().and_then(|s| s.to_str()).unwrap_or("unknown"),
-            claude_pid
+            root_pid
         );
         let dir = root.join("sessions").join(&id);
         fs::create_dir_all(&dir).with_context(|| format!("create session dir {dir:?}"))?;
@@ -86,7 +92,8 @@ impl Session {
             ended_at: None,
             cwd: cwd.to_path_buf(),
             argv: argv.to_vec(),
-            claude_pid,
+            provider,
+            root_pid,
             tracer_pid,
             hostname: hostname(),
             macos_version: macos_version(),

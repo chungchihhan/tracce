@@ -10,9 +10,19 @@ fn help_lists_the_core_subcommands() {
     assert!(out.status.success(), "--help should succeed");
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("Usage:"), "help should contain Usage:, got:\n{stdout}");
-    for sub in ["claude", "attach", "exec", "view", "list", "export", "import"] {
+    for sub in ["claude", "codex", "attach", "exec", "view", "list", "export", "import"] {
         assert!(stdout.contains(sub), "help should mention `{sub}`, got:\n{stdout}");
     }
+}
+
+#[test]
+fn bare_command_prints_safe_usage_hint() {
+    let out = bin().output().unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("tracce claude"));
+    assert!(stdout.contains("tracce codex"));
+    assert!(stdout.contains("tracce view"));
 }
 
 #[test]
@@ -49,6 +59,7 @@ fn attach_help_documents_optional_pid() {
     assert!(out.status.success());
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.to_lowercase().contains("pid"), "attach help should mention pid, got:\n{stdout}");
+    assert!(stdout.contains("--agent"), "attach help should mention --agent, got:\n{stdout}");
 }
 
 #[test]
