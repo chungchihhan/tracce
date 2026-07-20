@@ -7,7 +7,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, List, ListItem, ListState, Padding, Paragraph};
+use ratatui::widgets::{Block, BorderType, Borders, Cell, ListState, Padding, Paragraph, Row, Table, TableState};
 use ratatui::{Frame, Terminal};
 use std::io::stdout;
 use std::path::Path;
@@ -89,13 +89,16 @@ fn draw(f: &mut Frame, entries: &[SessionEntry], counts: &[usize], state: &mut L
     let show_logo = inner.height >= 16 && inner.width >= 50;
 
     // Session-table column widths (left pane). PROJECT flexes to fill the rest of
-    // the pane, so the selection highlight spans the whole column.
-    const W_STATUS: usize = 8;
-    const W_START: usize = 17;
-    const W_DUR: usize = 7;
-    const W_EVENTS: usize = 9;
-    const W_GAP: usize = 2;
-    let fixed = W_STATUS + W_START + W_DUR + W_EVENTS + W_GAP;
+    // the pane. Keep the fixed columns deliberately roomy; Table owns the cell
+    // boundaries so headers and rows cannot drift apart due to string padding.
+    const W_STATUS: u16 = 9;
+    const W_AGENT: u16 = 11;
+    const W_START: u16 = 18;
+    const W_DUR: u16 = 8;
+    const W_EVENTS: u16 = 10;
+    const W_GAP: u16 = 2;
+    const W_PROJECT_MIN: u16 = 10;
+    let fixed = usize::from(W_STATUS + W_AGENT + W_START + W_DUR + W_EVENTS + (W_GAP * 5));
 
     // Vertical: [logo] · body · footer.
     let mut constraints: Vec<Constraint> = Vec::new();
@@ -121,58 +124,64 @@ fn draw(f: &mut Frame, entries: &[SessionEntry], counts: &[usize], state: &mut L
     // Body: split the width in half — session table on the LEFT, detail of the
     // selected session on the RIGHT. On terminals too narrow for a useful split,
     // drop the detail and size the table to its content.
-    let (table_area, proj_w, detail_area) = if body.width as usize >= 2 * (fixed + 8) {
+    let (table_area, detail_area) = if body.width as usize >= 2 * (fixed + usize::from(W_PROJECT_MIN)) {
         let h = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
             .split(body);
-        let pw = (h[0].width as usize).saturating_sub(fixed); // PROJECT fills the half
-        (h[0], pw, Some(h[1]))
+        (h[0], Some(h[1]))
     } else {
-        let pw = entries.iter()
+        let project_w = entries.iter()
             .map(|e| project_name(e).chars().count())
             .max().unwrap_or(0)
             .max("PROJECT".len())
             .min(30);
-        let tw = ((fixed + pw) as u16).min(body.width);
+        let tw = ((fixed + project_w.max(usize::from(W_PROJECT_MIN))) as u16).min(body.width);
         let h = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Length(tw), Constraint::Min(0)])
             .split(body);
-        (h[0], pw, None)
+        (h[0], None)
     };
 
-    // Left column: column header + scrolling list, left-anchored.
-    let lv = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Min(1)])
-        .split(table_area);
+    // Left column: a real fixed-column table keeps every header and row aligned.
+    let project_w = table_area.width.saturating_sub(fixed as u16).max(1) as usize;
     let header_style = Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD);
-    f.render_widget(
-        Paragraph::new(Line::styled(
-            format!(
-                "{:<W_STATUS$}{:<W_START$}{:>W_DUR$}{:>W_EVENTS$}{:W_GAP$}{:<proj_w$}",
-                "STATUS", "STARTED", "DUR", "EVENTS", "", "PROJECT",
-            ),
-            header_style,
-        )),
-        lv[0],
-    );
-    let items: Vec<ListItem> = entries.iter().zip(counts).map(|(e, &cnt)| {
+    let header = Row::new([
+        Cell::from("STATUS"),
+        Cell::from("AGENT"),
+        Cell::from("STARTED"),
+        Cell::from(format!("{:>width$}", "DUR", width = usize::from(W_DUR))),
+        Cell::from(format!("{:>width$}", "EVENTS", width = usize::from(W_EVENTS))),
+        Cell::from("PROJECT"),
+    ])
+        .style(header_style);
+    let items: Vec<Row> = entries.iter().zip(counts).map(|(e, &cnt)| {
         let (glyph, gstyle) = status_badge(&e.status);
-        ListItem::new(Line::from(vec![
-            Span::styled(format!("{glyph:<W_STATUS$}"), gstyle),
-            Span::styled(format!("{:<W_START$}", e.meta.started_at.format("%Y-%m-%d %H:%M")), gray()),
-            Span::styled(format!("{:>W_DUR$}", duration_str(e)), gray()),
-            Span::styled(format!("{:>W_EVENTS$}", with_commas(cnt)), gray()),
-            Span::raw(" ".repeat(W_GAP)),
-            Span::styled(format!("{:<proj_w$}", trunc(&project_name(e), proj_w)), Style::default().fg(Color::White)),
-        ]))
+        Row::new([
+            Cell::from(glyph).style(gstyle),
+            Cell::from(e.meta.provider.to_string()).style(gray()),
+            Cell::from(e.meta.started_at.format("%Y-%m-%d %H:%M").to_string()).style(gray()),
+            Cell::from(format!("{:>width$}", duration_str(e), width = usize::from(W_DUR))).style(gray()),
+            Cell::from(format!("{:>width$}", with_commas(cnt), width = usize::from(W_EVENTS))).style(gray()),
+            Cell::from(trunc(&project_name(e), project_w)).style(Style::default().fg(Color::White)),
+        ])
     }).collect();
-    let list = List::new(items).highlight_style(
+    let table = Table::new(items, [
+        Constraint::Length(W_STATUS),
+        Constraint::Length(W_AGENT),
+        Constraint::Length(W_START),
+        Constraint::Length(W_DUR),
+        Constraint::Length(W_EVENTS),
+        Constraint::Min(W_PROJECT_MIN),
+    ])
+    .header(header)
+    .column_spacing(W_GAP)
+    .row_highlight_style(
         Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD),
     );
-    f.render_stateful_widget(list, lv[1], state);
+    let mut table_state = TableState::default().with_selected(state.selected());
+    f.render_stateful_widget(table, table_area, &mut table_state);
 
     // Right column: detail of the selected session, behind a left divider line.
     if let Some(area) = detail_area {
@@ -186,7 +195,11 @@ fn draw(f: &mut Frame, entries: &[SessionEntry], counts: &[usize], state: &mut L
         let dv = (dinner.width as usize).saturating_sub(9).max(1); // value width after the label
 
         let (glyph, gstyle) = status_badge(&e.status);
-        let cmd = if e.meta.argv.is_empty() { "claude".to_string() } else { e.meta.argv.join(" ") };
+        let cmd = if e.meta.argv.is_empty() {
+            e.meta.provider.command().unwrap_or("command").to_string()
+        } else {
+            e.meta.argv.join(" ")
+        };
         let kv = |k: &str, v: Span<'static>| {
             Line::from(vec![Span::styled(format!("{k:<9}"), Style::default().fg(Color::DarkGray)), v])
         };
@@ -200,7 +213,6 @@ fn draw(f: &mut Frame, entries: &[SessionEntry], counts: &[usize], state: &mut L
             Line::raw(""),
             // Keep the tail of the path (the project) rather than the /Users prefix.
             kv("cwd", Span::styled(front_trunc(&e.meta.cwd.display().to_string(), dv), gray())),
-            kv("agent", Span::styled(e.meta.provider.to_string(), gray())),
             kv("command", Span::styled(trunc(&cmd, dv), gray())),
             kv("session", Span::styled(trunc(&e.meta.session_id, dv), gray())),
             kv("pid", Span::styled(e.meta.root_pid.to_string(), gray())),
@@ -284,7 +296,3 @@ fn count_lines(p: &Path) -> std::io::Result<usize> {
     let f = std::fs::File::open(p)?;
     Ok(BufReader::new(f).lines().count())
 }
-
-
-
-
