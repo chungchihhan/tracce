@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::path::Path;
 
 /// The agent or command at the root of a trace. The tracing and viewer
 /// pipeline is shared across providers; this value selects launch,
@@ -19,6 +20,21 @@ impl Default for Provider {
 }
 
 impl Provider {
+    /// Infer a provider from the root executable in a legacy recording.
+    ///
+    /// Provider metadata was added after the first session format, so older
+    /// recordings need the command line as a fallback. An unknown executable
+    /// is an ordinary command rather than Claude.
+    pub fn from_argv(argv: &[String]) -> Option<Self> {
+        let executable = argv.first()?;
+        let basename = Path::new(executable).file_name()?.to_str()?;
+        Some(match basename {
+            "claude" => Self::Claude,
+            "codex" | "codex-cli" => Self::Codex,
+            _ => Self::Other,
+        })
+    }
+
     pub fn command(self) -> Option<&'static str> {
         match self {
             Self::Claude => Some("claude"),

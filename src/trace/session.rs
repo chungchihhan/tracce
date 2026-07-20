@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::{de::Deserializer, Deserialize, Serialize};
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -24,7 +24,7 @@ impl SessionStatus {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Meta {
     pub session_id: String,
     pub started_at: DateTime<Utc>,
@@ -41,6 +41,49 @@ pub struct Meta {
     // `alias` keeps sessions recorded before the ctrace→tracce rename readable.
     #[serde(alias = "ctrace_version")]
     pub tracce_version: String,
+}
+
+impl<'de> Deserialize<'de> for Meta {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct StoredMeta {
+            session_id: String,
+            started_at: DateTime<Utc>,
+            ended_at: Option<DateTime<Utc>>,
+            cwd: PathBuf,
+            argv: Vec<String>,
+            #[serde(default)]
+            provider: Option<Provider>,
+            #[serde(alias = "claude_pid")]
+            root_pid: u32,
+            tracer_pid: u32,
+            hostname: String,
+            macos_version: String,
+            #[serde(alias = "ctrace_version")]
+            tracce_version: String,
+        }
+
+        let stored = StoredMeta::deserialize(deserializer)?;
+        let provider = stored.provider
+            .or_else(|| Provider::from_argv(&stored.argv))
+            .unwrap_or_default();
+        Ok(Self {
+            session_id: stored.session_id,
+            started_at: stored.started_at,
+            ended_at: stored.ended_at,
+            cwd: stored.cwd,
+            argv: stored.argv,
+            provider,
+            root_pid: stored.root_pid,
+            tracer_pid: stored.tracer_pid,
+            hostname: stored.hostname,
+            macos_version: stored.macos_version,
+            tracce_version: stored.tracce_version,
+        })
+    }
 }
 
 #[derive(Debug)]

@@ -59,6 +59,24 @@ fn session_records_provider_and_neutral_root_pid() {
 }
 
 #[test]
+fn legacy_metadata_infers_provider_from_root_command() {
+    let meta: tracce::trace::session::Meta = serde_json::from_str(r#"{
+        "session_id": "legacy",
+        "started_at": "2026-05-28T10:00:00Z",
+        "ended_at": null,
+        "cwd": "/tmp",
+        "argv": ["bash", "-lc", "echo hi"],
+        "claude_pid": 4711,
+        "tracer_pid": 2,
+        "hostname": "h",
+        "macos_version": "15.4",
+        "tracce_version": "0.1.0"
+    }"#).unwrap();
+
+    assert_eq!(meta.provider, Provider::Other);
+}
+
+#[test]
 fn session_mark_done_updates_status_and_ended_at() {
     let root = TempDir::new().unwrap();
     let s = Session::create(
