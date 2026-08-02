@@ -83,7 +83,7 @@ pub enum Cmd {
         #[arg(long)]
         force: bool,
     },
-    /// Reset ownership of session files left root-owned by a crashed trace.
+    /// Reset ownership of session files left root-owned by an interrupted trace.
     FixPerms {
         /// Specific session id to fix; omit to fix all.
         session: Option<String>,

@@ -38,8 +38,8 @@ pub fn discover(root: &Path) -> Result<Vec<SessionEntry>> {
         let mut status = std::fs::read_to_string(dir.join("status"))
             .map(|s| s.trim().to_string()).unwrap_or_else(|_| "?".into());
         if status == "live" && !pid_alive(meta.tracer_pid) {
-            let _ = std::fs::write(dir.join("status"), "crashed\n");
-            status = "crashed".into();
+            let _ = std::fs::write(dir.join("status"), "interrupted\n");
+            status = "interrupted".into();
         }
         let events_path = dir.join("events.jsonl");
         out.push(SessionEntry { dir, meta, status, events_path });

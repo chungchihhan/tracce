@@ -11,7 +11,7 @@ use super::provider::Provider;
 pub enum SessionStatus {
     Live,
     Done,
-    Crashed,
+    Interrupted,
 }
 
 impl SessionStatus {
@@ -19,7 +19,7 @@ impl SessionStatus {
         match self {
             Self::Live => "live",
             Self::Done => "done",
-            Self::Crashed => "crashed",
+            Self::Interrupted => "interrupted",
         }
     }
 }
@@ -150,7 +150,7 @@ impl Session {
 
     pub fn mark_status(&self, status: SessionStatus) -> Result<()> {
         write_status_file(&self.dir, status)?;
-        if matches!(status, SessionStatus::Done | SessionStatus::Crashed) {
+        if matches!(status, SessionStatus::Done | SessionStatus::Interrupted) {
             // Patch ended_at in meta.json.
             let text = fs::read_to_string(self.dir.join("meta.json"))?;
             let mut m: Meta = serde_json::from_str(&text)?;
