@@ -4,48 +4,99 @@ use anyhow::Result;
 use chrono::Utc;
 use crossterm::event::{self, Event as CtEvent, KeyCode};
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Alignment, Constraint, Direction, Layout};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Cell, ListState, Padding, Paragraph, Row, Table, TableState};
+use ratatui::widgets::{Block, BorderType, Borders, Cell, Clear, ListState, Padding, Paragraph, Row, Table, TableState};
 use ratatui::{Frame, Terminal};
 use std::io::stdout;
 use std::path::Path;
 
-pub fn pick(entries: Vec<SessionEntry>) -> Result<Option<SessionEntry>> {
+pub fn pick(mut entries: Vec<SessionEntry>) -> Result<Option<SessionEntry>> {
     if entries.is_empty() { return Ok(None); }
     let _guard = crate::view::TerminalGuard::enter()?;
     let backend = CrosstermBackend::new(stdout());
     let mut term = Terminal::new(backend)?;
 
     // Count events once per session up front; redraws then stay cheap.
-    let counts: Vec<usize> = entries.iter()
+    let mut counts: Vec<usize> = entries.iter()
         .map(|e| count_lines(&e.events_path).unwrap_or(0))
         .collect();
 
-    let n = entries.len();
     let mut state = ListState::default();
     state.select(Some(0));
     let mut picked: Option<usize> = None;
     // Result of the most recent `e` export, shown in the footer until the next key.
     let mut flash: Option<String> = None;
+    let mut delete_confirm: Option<usize> = None;
 
     loop {
-        term.draw(|f| draw(f, &entries, &counts, &mut state, flash.as_deref()))?;
+        term.draw(|f| draw(
+            f,
+            &entries,
+            &counts,
+            &mut state,
+            flash.as_deref(),
+            delete_confirm.and_then(|i| entries.get(i)),
+        ))?;
         let ev = event::read()?;
         // Any event (key, resize, …) dismisses a stale export flash so it never
         // lingers on screen waiting specifically for a keypress.
         flash = None;
         if let CtEvent::Key(k) = ev {
             let cur = state.selected().unwrap_or(0);
+            if let Some(index) = delete_confirm {
+                match k.code {
+                    KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+                        let live = entries[index].status == "live";
+                        if live {
+                            flash = Some("cannot delete a live session".into());
+                        } else {
+                            let id = entries[index].meta.session_id.clone();
+                            let dir = entries[index].dir.clone();
+                            match std::fs::remove_dir_all(dir) {
+                                Ok(()) => {
+                                    entries.remove(index);
+                                    counts.remove(index);
+                                    delete_confirm = None;
+                                    if entries.is_empty() {
+                                        return Ok(None);
+                                    }
+                                    state.select(Some(index.min(entries.len() - 1)));
+                                    flash = Some(format!("deleted session {id}"));
+                                }
+                                Err(e) => {
+                                    delete_confirm = None;
+                                    flash = Some(format!("delete failed: {e}"));
+                                }
+                            }
+                        }
+                        if live {
+                            delete_confirm = None;
+                        }
+                    }
+                    KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                        delete_confirm = None;
+                    }
+                    _ => {}
+                }
+                continue;
+            }
             match k.code {
                 KeyCode::Char('q') | KeyCode::Esc => break,
-                KeyCode::Down | KeyCode::Char('j') => state.select(Some((cur + 1).min(n - 1))),
+                KeyCode::Down | KeyCode::Char('j') => state.select(Some((cur + 1).min(entries.len() - 1))),
                 KeyCode::Up | KeyCode::Char('k') => state.select(Some(cur.saturating_sub(1))),
-                KeyCode::PageDown => state.select(Some((cur + 10).min(n - 1))),
+                KeyCode::PageDown => state.select(Some((cur + 10).min(entries.len() - 1))),
                 KeyCode::PageUp => state.select(Some(cur.saturating_sub(10))),
                 KeyCode::Home | KeyCode::Char('g') => state.select(Some(0)),
-                KeyCode::End | KeyCode::Char('G') => state.select(Some(n - 1)),
+                KeyCode::End | KeyCode::Char('G') => state.select(Some(entries.len() - 1)),
+                KeyCode::Char('d') => {
+                    if entries[cur].status == "live" {
+                        flash = Some("cannot delete a live session".into());
+                    } else {
+                        delete_confirm = Some(cur);
+                    }
+                }
                 KeyCode::Char('e') => {
                     let entry = &entries[cur];
                     let out = std::path::PathBuf::from(
@@ -65,7 +116,14 @@ pub fn pick(entries: Vec<SessionEntry>) -> Result<Option<SessionEntry>> {
     Ok(picked.map(|i| entries[i].clone()))
 }
 
-fn draw(f: &mut Frame, entries: &[SessionEntry], counts: &[usize], state: &mut ListState, flash: Option<&str>) {
+fn draw(
+    f: &mut Frame,
+    entries: &[SessionEntry],
+    counts: &[usize],
+    state: &mut ListState,
+    flash: Option<&str>,
+    delete_confirm: Option<&SessionEntry>,
+) {
     let area = f.area();
 
     // Outer frame: rounded cyan border, matching the dashboard chrome.
@@ -229,10 +287,50 @@ fn draw(f: &mut Frame, entries: &[SessionEntry], counts: &[usize], state: &mut L
             key_cap("↑/↓"), Span::styled(" move   ", gray()),
             key_cap("Enter"), Span::styled(" open   ", gray()),
             key_cap("e"), Span::styled(" export   ", gray()),
+            key_cap("d"), Span::styled(" delete   ", gray()),
             key_cap("q"), Span::styled(" cancel", gray()),
         ])
     };
     f.render_widget(Paragraph::new(footer).alignment(Alignment::Center), footer_rect);
+
+    if let Some(entry) = delete_confirm {
+        draw_delete_confirm(f, area, entry);
+    }
+}
+
+fn draw_delete_confirm(f: &mut Frame, area: Rect, entry: &SessionEntry) {
+    let width = 68.min(area.width);
+    let height = 9.min(area.height);
+    let rect = Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::Red))
+        .title(Span::styled(
+            " delete session ",
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        ));
+    let inner = block.inner(rect);
+    f.render_widget(Clear, rect);
+    f.render_widget(block, rect);
+    let text = vec![
+        Line::from(Span::styled(
+            format!("Delete {}?", entry.meta.session_id),
+            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+        )),
+        Line::raw("This permanently removes the recorded session."),
+        Line::raw(""),
+        Line::from(Span::styled(
+            "y / Enter delete   n / Esc cancel",
+            Style::default().fg(Color::Yellow),
+        )),
+    ];
+    f.render_widget(Paragraph::new(text), inner);
 }
 
 fn gray() -> Style { Style::default().fg(Color::Gray) }

@@ -132,6 +132,9 @@ tracce import run.tracce.tgz           # unpacks into ~/.tracce, then: tracce vi
 You can also press `e` in the dashboard or the session picker to export the
 session you're looking at.
 
+In the session picker, press `d` to delete a completed or interrupted recording;
+tracce asks for confirmation before permanently removing it.
+
 If a trace is interrupted and leaves files in an odd state, run `tracce fix-perms`.
 
 ## The dashboard
