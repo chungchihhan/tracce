@@ -124,13 +124,13 @@ tracce exec -- npm test                # testing hatch: trace any command
 into one compressed file you can send; import drops it back in, ready to `view`:
 
 ```sh
-tracce export <session-id-prefix>      # writes ./<id>.tracce.tgz
+tracce export <session-id-prefix>      # writes ./tracce-exports/<id>.tracce.tgz
 tracce export --latest -o run.tracce.tgz
 tracce import run.tracce.tgz           # unpacks into ~/.tracce, then: tracce view <id>
 ```
 
 You can also press `e` in the dashboard or the session picker to export the
-session you're looking at.
+session you're looking at into `./tracce-exports/`.
 
 In the session picker, press `d` to delete a completed or interrupted recording;
 tracce asks for confirmation before permanently removing it.

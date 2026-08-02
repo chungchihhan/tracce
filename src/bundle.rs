@@ -14,6 +14,7 @@ use std::path::{Component, Path, PathBuf};
 
 /// The exact files that make up a session. Import accepts only these names.
 pub const SESSION_FILES: [&str; 3] = ["events.jsonl", "meta.json", "status"];
+pub const DEFAULT_EXPORT_DIR: &str = "tracce-exports";
 
 /// Per-entry decompression ceilings. `events.jsonl` gets the full cap; meta and
 /// status are clamped far smaller so a bomb in a small file is caught early.
@@ -27,6 +28,14 @@ fn cap_for(name: &str) -> u64 {
         "status" => MAX_STATUS_BYTES,
         _ => MAX_ENTRY_BYTES,
     }
+}
+
+/// Return the default export path and create its containing directory.
+pub fn default_export_path(session_id: &str) -> Result<PathBuf> {
+    let dir = PathBuf::from(DEFAULT_EXPORT_DIR);
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("create export directory {}", dir.display()))?;
+    Ok(dir.join(format!("{session_id}.tracce.tgz")))
 }
 
 /// Bundle `entry`'s session directory into a gzip tarball at `out`.

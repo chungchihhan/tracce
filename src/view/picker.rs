@@ -99,11 +99,11 @@ pub fn pick(mut entries: Vec<SessionEntry>) -> Result<Option<SessionEntry>> {
                 }
                 KeyCode::Char('e') => {
                     let entry = &entries[cur];
-                    let out = std::path::PathBuf::from(
-                        format!("{}.tracce.tgz", entry.meta.session_id),
-                    );
-                    flash = Some(match crate::bundle::export(entry, &out) {
-                        Ok(n) => format!("exported -> {} ({} bytes)", out.display(), n),
+                    flash = Some(match crate::bundle::default_export_path(&entry.meta.session_id) {
+                        Ok(out) => match crate::bundle::export(entry, &out) {
+                            Ok(n) => format!("exported -> {} ({} bytes)", out.display(), n),
+                            Err(e) => format!("export failed: {e:#}"),
+                        },
                         Err(e) => format!("export failed: {e:#}"),
                     });
                 }
