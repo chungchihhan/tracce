@@ -1448,7 +1448,7 @@ fn severity_label(sev: Option<Severity>) -> String {
 /// Dim every cell in `area` so a modal reads as a focused overlay. Runs after
 /// the main UI is drawn but before the modal, which then overwrites (un-dims)
 /// its own footprint via `Clear`.
-fn dim_backdrop(f: &mut Frame, area: Rect) {
+pub(crate) fn dim_backdrop(f: &mut Frame, area: Rect) {
     let buf = f.buffer_mut();
     // Only add DIM — keep each cell's own colors so the dashboard just darkens
     // rather than turning a flat near-black.
@@ -1479,7 +1479,7 @@ fn dim_backdrop(f: &mut Frame, area: Rect) {
 /// Shared modal chrome: cyan rounded border + cyan-bold title and a little
 /// breathing room, matching the pane styling so the overlays don't look like a
 /// different app.
-fn modal_block(title: &str) -> Block<'static> {
+pub(crate) fn modal_block(title: &str) -> Block<'static> {
     Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -1535,7 +1535,7 @@ fn help_kv(key: &str, desc: &str) -> Line<'static> {
 }
 
 /// A rectangle of fixed size centered within `area`, clamped to fit.
-fn centered_fixed(width: u16, height: u16, area: Rect) -> Rect {
+pub(crate) fn centered_fixed(width: u16, height: u16, area: Rect) -> Rect {
     let w = width.min(area.width);
     let h = height.min(area.height);
     Rect {
