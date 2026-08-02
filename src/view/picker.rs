@@ -1,5 +1,5 @@
 use crate::view::discovery::SessionEntry;
-use crate::view::ui::app::{key_cap, logo_lines};
+use crate::view::ui::app::{centered_fixed, dim_backdrop, key_cap, logo_lines, modal_block};
 use anyhow::Result;
 use chrono::Utc;
 use crossterm::event::{self, Event as CtEvent, KeyCode};
@@ -299,36 +299,27 @@ fn draw(
 }
 
 fn draw_delete_confirm(f: &mut Frame, area: Rect, entry: &SessionEntry) {
-    let width = 68.min(area.width);
-    let height = 9.min(area.height);
-    let rect = Rect {
-        x: area.x + area.width.saturating_sub(width) / 2,
-        y: area.y + area.height.saturating_sub(height) / 2,
-        width,
-        height,
-    };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(Color::Red))
-        .title(Span::styled(
-            " delete session ",
-            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-        ));
+    dim_backdrop(f, area);
+    let rect = centered_fixed(72, 12, area);
+    let block = modal_block(" Delete session? ").padding(Padding::new(4, 4, 2, 2));
     let inner = block.inner(rect);
     f.render_widget(Clear, rect);
     f.render_widget(block, rect);
     let text = vec![
+        Line::from(Span::raw("Delete this recorded session permanently?")).alignment(Alignment::Center),
         Line::from(Span::styled(
-            format!("Delete {}?", entry.meta.session_id),
-            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
-        )),
-        Line::raw("This permanently removes the recorded session."),
+            trunc(&entry.meta.session_id, 54),
+            Style::default().fg(Color::Gray),
+        )).alignment(Alignment::Center),
         Line::raw(""),
-        Line::from(Span::styled(
-            "y / Enter delete   n / Esc cancel",
-            Style::default().fg(Color::Yellow),
-        )),
+        Line::from(vec![
+            key_cap("y"), Span::raw(" Yes"),
+            Span::raw("      "),
+            key_cap("n"), Span::raw(" No"),
+        ]).alignment(Alignment::Center),
+        Line::raw(""),
+        Line::from(Span::styled("Enter / y  ·  Esc / n", Style::default().fg(Color::DarkGray)))
+            .alignment(Alignment::Center),
     ];
     f.render_widget(Paragraph::new(text), inner);
 }
