@@ -37,7 +37,7 @@ pub fn pick(mut entries: Vec<SessionEntry>) -> Result<Option<SessionEntry>> {
             &counts,
             &mut state,
             flash.as_deref(),
-            delete_confirm.and_then(|i| entries.get(i)),
+            delete_confirm,
         ))?;
         let ev = event::read()?;
         // Any event (key, resize, …) dismisses a stale export flash so it never
@@ -122,7 +122,7 @@ fn draw(
     counts: &[usize],
     state: &mut ListState,
     flash: Option<&str>,
-    delete_confirm: Option<&SessionEntry>,
+    delete_confirm: Option<usize>,
 ) {
     let area = f.area();
 
@@ -293,34 +293,55 @@ fn draw(
     };
     f.render_widget(Paragraph::new(footer).alignment(Alignment::Center), footer_rect);
 
-    if let Some(entry) = delete_confirm {
-        draw_delete_confirm(f, area, entry);
+    if let Some(index) = delete_confirm {
+        if let (Some(entry), Some(&count)) = (entries.get(index), counts.get(index)) {
+            draw_delete_confirm(f, area, entry, count);
+        }
     }
 }
 
-fn draw_delete_confirm(f: &mut Frame, area: Rect, entry: &SessionEntry) {
+fn draw_delete_confirm(f: &mut Frame, area: Rect, entry: &SessionEntry, count: usize) {
     dim_backdrop(f, area);
-    let rect = centered_fixed(72, 12, area);
-    let block = modal_block(" Delete session? ").padding(Padding::new(4, 4, 2, 2));
+    let rect = centered_fixed(96, 20, area);
+    let block = modal_block(" Delete session? ").padding(Padding::new(3, 3, 1, 1));
     let inner = block.inner(rect);
     f.render_widget(Clear, rect);
     f.render_widget(block, rect);
-    let text = vec![
-        Line::from(Span::raw("Delete this recorded session permanently?")).alignment(Alignment::Center),
+    let value_width = inner.width.saturating_sub(11) as usize;
+    let command = if entry.meta.argv.is_empty() {
+        entry.meta.provider.command().unwrap_or("command").to_string()
+    } else {
+        entry.meta.argv.join(" ")
+    };
+    let kv = |key: &str, value: String| {
+        Line::from(vec![
+            Span::styled(format!("{key:<9}"), Style::default().fg(Color::DarkGray)),
+            Span::styled(value, Style::default().fg(Color::Gray)),
+        ])
+    };
+    let mut text = vec![
         Line::from(Span::styled(
-            trunc(&entry.meta.session_id, 54),
-            Style::default().fg(Color::Gray),
+            "Delete this recorded session permanently?",
+            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
         )).alignment(Alignment::Center),
         Line::raw(""),
-        Line::from(vec![
-            key_cap("y"), Span::raw(" Yes"),
-            Span::raw("      "),
-            key_cap("n"), Span::raw(" No"),
-        ]).alignment(Alignment::Center),
+        kv("status", status_badge(&entry.status).0.to_string()),
+        kv("agent", entry.meta.provider.to_string()),
+        kv("started", entry.meta.started_at.format("%Y-%m-%d %H:%M:%S").to_string()),
+        kv("duration", duration_str(entry)),
+        kv("events", with_commas(count)),
+        kv("cwd", front_trunc(&entry.meta.cwd.display().to_string(), value_width)),
+        kv("command", trunc(&command, value_width)),
+        kv("session", trunc(&entry.meta.session_id, value_width)),
+        kv("pid", entry.meta.root_pid.to_string()),
+        kv("host", trunc(&entry.meta.hostname, value_width)),
         Line::raw(""),
-        Line::from(Span::styled("Enter / y  ·  Esc / n", Style::default().fg(Color::DarkGray)))
-            .alignment(Alignment::Center),
     ];
+    text.push(Line::from(vec![
+        key_cap("y"), Span::raw(" Yes"),
+        Span::raw("      "),
+        key_cap("n"), Span::raw(" No"),
+    ]).alignment(Alignment::Center));
     f.render_widget(Paragraph::new(text), inner);
 }
 
