@@ -22,12 +22,12 @@ pub fn run(root: &Path, only: Option<String>) -> Result<()> {
             if dir.file_name().and_then(|n| n.to_str()) != Some(o.as_str()) { continue; }
         }
         chown_recursive(&dir, uid, gid)?;
-        // Mark a still-"live" entry whose tracer is gone as crashed.
+        // Mark a still-"live" entry whose tracer is gone as interrupted.
         if std::fs::read_to_string(dir.join("status")).map(|s| s.trim() == "live").unwrap_or(false) {
             if let Ok(text) = std::fs::read_to_string(dir.join("meta.json")) {
                 if let Ok(meta) = serde_json::from_str::<crate::trace::session::Meta>(&text) {
                     if !pid_alive(meta.tracer_pid) {
-                        std::fs::write(dir.join("status"), "crashed\n")?;
+                        std::fs::write(dir.join("status"), "interrupted\n")?;
                     }
                 }
             }

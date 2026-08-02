@@ -108,7 +108,7 @@ fn app_ingests_events_into_panes() {
 }
 
 #[test]
-fn discover_marks_stale_live_as_crashed() {
+fn discover_marks_stale_live_as_interrupted() {
     let root = TempDir::new().unwrap();
     let id = "2026-05-28T09-00-00_stale_99999";
     touch_session(root.path(), id, "live", "2026-05-28T09:00:00Z");
@@ -130,7 +130,7 @@ fn discover_marks_stale_live_as_crashed() {
 
     let entries = tracce::view::discovery::discover(root.path()).unwrap();
     let entry = entries.iter().find(|e| e.meta.session_id == id).unwrap();
-    assert_eq!(entry.status, "crashed");
+    assert_eq!(entry.status, "interrupted");
     let status = std::fs::read_to_string(root.path().join("sessions").join(id).join("status")).unwrap();
-    assert_eq!(status.trim(), "crashed");
+    assert_eq!(status.trim(), "interrupted");
 }

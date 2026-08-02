@@ -132,7 +132,7 @@ tracce import run.tracce.tgz           # unpacks into ~/.tracce, then: tracce vi
 You can also press `e` in the dashboard or the session picker to export the
 session you're looking at.
 
-If a trace crashes and leaves files in an odd state, run `tracce fix-perms`.
+If a trace is interrupted and leaves files in an odd state, run `tracce fix-perms`.
 
 ## The dashboard
 

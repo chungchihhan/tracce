@@ -260,7 +260,7 @@ fn front_trunc(s: &str, n: usize) -> String {
 fn status_badge(status: &str) -> (&'static str, Style) {
     match status {
         "live" => ("● live", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-        "crashed" => ("✗ crash", Style::default().fg(Color::Red)),
+        "interrupted" | "crashed" => ("↯ interrupted", Style::default().fg(Color::Red)),
         _ => ("○ done", Style::default().fg(Color::DarkGray)),
     }
 }
@@ -269,7 +269,7 @@ fn project_name(e: &SessionEntry) -> String {
     e.meta.cwd.file_name().and_then(|s| s.to_str()).unwrap_or("?").to_string()
 }
 
-/// Wall-clock span of the session. Live/crashed sessions with no recorded end
+/// Wall-clock span of the session. Live/interrupted sessions with no recorded end
 /// are measured to "now".
 fn duration_str(e: &SessionEntry) -> String {
     let end = e.meta.ended_at.unwrap_or_else(Utc::now);
