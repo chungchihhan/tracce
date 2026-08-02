@@ -91,7 +91,7 @@ fn draw(f: &mut Frame, entries: &[SessionEntry], counts: &[usize], state: &mut L
     // Session-table column widths (left pane). PROJECT flexes to fill the rest of
     // the pane. Keep the fixed columns deliberately roomy; Table owns the cell
     // boundaries so headers and rows cannot drift apart due to string padding.
-    const W_STATUS: u16 = 9;
+    const W_STATUS: u16 = 15;
     const W_AGENT: u16 = 11;
     const W_START: u16 = 18;
     const W_DUR: u16 = 8;
