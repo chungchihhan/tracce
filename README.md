@@ -41,8 +41,7 @@ file, and network connection, live in your terminal or replayed later.
 brew install chungchihhan/tap/tracce
 
 # Terminal A — start a traced agent
-tracce claude
-# or: tracce codex
+tracce claude # or: tracce codex
 
 # Terminal B — watch it live (and replay anytime later)
 tracce view
@@ -92,11 +91,10 @@ ways to get there.
 ```sh
 # Terminal A — start a traced Claude Code session (claude owns this terminal)
 tracce claude
-tracce claude --print "explain this repo"
 # or:
 tracce codex
 
-# Terminal B — follow it live (auto-picks the live session)
+# Terminal B — choose a session from the picker
 tracce view
 ```
 
@@ -170,7 +168,7 @@ path / argv / host, untruncated, plus when it happened). On the focused EVENTS/s
 | `t` / `g` / `G` | tail latest / follow latest / oldest |
 | `f` | show flagged rows in the focused pane |
 | `p` | pause |
-| `e` | export this session to `./<id>.tracce.tgz` |
+| `e` | export this session to `./tracce-exports/<id>.tracce.tgz` |
 | `s` | switch session (back to the picker) |
 | `h` or `?` | help |
 | `q` / `Esc` | quit  ·  `Ctrl-C` quits immediately |
