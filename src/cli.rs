@@ -68,7 +68,7 @@ pub enum Cmd {
     Export {
         /// Session id or id-prefix. Omit to use the picker (or the only/live session).
         target: Option<String>,
-        /// Output path. Default: ./<session-id>.tracce.tgz
+        /// Output path. Default: ./tracce-exports/<session-id>.tracce.tgz
         #[arg(short, long)]
         output: Option<PathBuf>,
         /// Export the most recently started session without showing a picker.

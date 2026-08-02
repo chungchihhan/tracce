@@ -71,7 +71,7 @@ fn main() -> std::process::ExitCode {
     }
 }
 
-/// Resolve a session and export it; default output is ./<id>.tracce.tgz.
+/// Resolve a session and export it; default output is ./tracce-exports/<id>.tracce.tgz.
 fn export_session(
     target: Option<String>,
     output: Option<std::path::PathBuf>,
@@ -79,8 +79,10 @@ fn export_session(
     root: &std::path::Path,
 ) -> anyhow::Result<()> {
     let entry = tracce::view::run::resolve_entry(target, latest, root)?;
-    let out = output
-        .unwrap_or_else(|| std::path::PathBuf::from(format!("{}.tracce.tgz", entry.meta.session_id)));
+    let out = match output {
+        Some(path) => path,
+        None => tracce::bundle::default_export_path(&entry.meta.session_id)?,
+    };
     let n = tracce::bundle::export(&entry, &out)?;
     println!("exported {} ({} bytes) -> {}", entry.meta.session_id, n, out.display());
     Ok(())

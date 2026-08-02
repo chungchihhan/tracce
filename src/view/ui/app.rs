@@ -226,7 +226,7 @@ impl App {
             (KeyCode::Char('h'), _) | (KeyCode::Char('?'), _) | (KeyCode::F(1), _) => {
                 self.mode = Mode::Help;
             }
-            // `e` exports the session being viewed to ./<id>.tracce.tgz.
+            // `e` exports the session being viewed to ./tracce-exports/<id>.tracce.tgz.
             (KeyCode::Char('e'), _) => self.export_session(),
             // `s` returns to the session picker (e.g. to switch to another live
             // session) without a confirm prompt — it's non-destructive, unlike quit.
@@ -400,10 +400,16 @@ impl App {
         }
     }
 
-    /// Export the session being viewed to ./<id>.tracce.tgz and show a flash.
+    /// Export the session being viewed to ./tracce-exports/<id>.tracce.tgz and show a flash.
     fn export_session(&mut self) {
-        let out =
-            std::path::PathBuf::from(format!("{}.tracce.tgz", self.session.meta.session_id));
+        let out = match crate::bundle::default_export_path(&self.session.meta.session_id) {
+            Ok(path) => path,
+            Err(e) => {
+                self.flash = Some(format!("export failed: {e:#}"));
+                self.mode = Mode::ExportFlash;
+                return;
+            }
+        };
         let msg = match crate::bundle::export(&self.session, &out) {
             Ok(n) => format!("exported -> {} ({} bytes)", out.display(), n),
             Err(e) => format!("export failed: {e:#}"),
@@ -1225,7 +1231,7 @@ impl App {
             help_kv("p", "pause / resume"),
             help_kv("/", "filter focused pane"),
             help_kv("f", "show flagged rows in focused pane"),
-            help_kv("e", "export this session to ./<id>.tracce.tgz"),
+            help_kv("e", "export to ./tracce-exports/<id>.tracce.tgz"),
             help_kv("s", "switch session (back to the picker)"),
             Line::raw(""),
             help_group("Activity glyphs"),
@@ -2323,7 +2329,7 @@ mod tests {
         let entry = crate::view::discovery::entry_for_dir(&dir).unwrap();
 
         let mut app = App::new(entry, FlagConfig::empty());
-        // Export writes the default ./<id>.tracce.tgz into cwd; point cwd at tmp
+        // Export writes the default ./tracce-exports/<id>.tracce.tgz into cwd; point cwd at tmp
         // so the artifact lands there and is cleaned up with the TempDir. cwd is
         // process-global and tests run in parallel, so a CwdGuard restores it
         // even if the assertions below panic, and a mutex serializes the swap.
@@ -2335,7 +2341,7 @@ mod tests {
             assert_eq!(app.mode, Mode::ExportFlash);
             let msg = app.flash.clone().expect("flash message set");
             assert!(msg.contains("exported"), "got: {msg}");
-            assert!(tmp.path().join(format!("{id}.tracce.tgz")).exists());
+            assert!(tmp.path().join("tracce-exports").join(format!("{id}.tracce.tgz")).exists());
         }
         // Any key dismisses.
         app.handle_key(code(KeyCode::Esc));
