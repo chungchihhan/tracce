@@ -173,7 +173,20 @@ fn parse_call(
     root_pid: u32,
     proc_ref: &Arc<ProcessRef>,
 ) -> Vec<Event> {
-    let Some(args) = args.and_then(as_object) else {
+    let Some(raw_args) = args else {
+        return Vec::new();
+    };
+    let Some(args) = as_object(raw_args) else {
+        // Newer Codex desktop/CLI rollouts can record an `exec` custom tool
+        // call as JavaScript rather than JSON, for example:
+        // `tools.exec_command({ cmd: "git status", ... })`.
+        // It is still useful intent for the ACTIVITY pane, so preserve the
+        // command as a synthetic Bash event.
+        if name == "exec" {
+            if let Some(command) = raw_args.as_str().and_then(extract_js_cmd) {
+                return vec![file_event(root_pid, proc_ref, FileOp::Bash, command)];
+            }
+        }
         return Vec::new();
     };
     match name {
@@ -191,6 +204,31 @@ fn parse_call(
         }
         _ => Vec::new(),
     }
+}
+
+/// Extract the double-quoted `cmd` field from a JavaScript tool-call object.
+/// The field value is JSON-compatible, so serde_json also handles escaped
+/// quotes, backslashes, and newlines for us.
+fn extract_js_cmd(input: &str) -> Option<String> {
+    let marker = input.find("cmd")?;
+    let rest = input[marker + 3..].trim_start();
+    let rest = rest.strip_prefix(':')?.trim_start();
+    if !rest.starts_with('"') {
+        return None;
+    }
+    let mut escaped = false;
+    for (offset, ch) in rest[1..].char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+        } else if ch == '"' {
+            return serde_json::from_str(&rest[..offset + 2]).ok();
+        }
+    }
+    None
 }
 
 fn as_object(value: &Value) -> Option<Value> {
@@ -401,6 +439,17 @@ mod tests {
         let desktop_exec = r#"{"type":"response_item","payload":{"type":"custom_tool_call","name":"exec","input":"return await tools.exec_command(...)"}}"#;
         assert!(parse_rollout_line(unknown, 100, &proc_ref()).is_empty());
         assert!(parse_rollout_line(desktop_exec, 100, &proc_ref()).is_empty());
+    }
+
+    #[test]
+    fn extracts_exec_command_from_javascript_custom_tool_call() {
+        let line = r#"{"type":"response_item","payload":{"type":"custom_tool_call","name":"exec","input":"const r = await tools.exec_command({ cmd: \"git status --short\", workdir: \"/tmp/project\" });"}}"#;
+        let events = parse_rollout_line(line, 100, &proc_ref());
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            &events[0].data,
+            EventData::File { op: FileOp::Bash, path, .. } if path == Path::new("git status --short")
+        ));
     }
 
     #[test]
