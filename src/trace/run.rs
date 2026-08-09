@@ -239,6 +239,7 @@ pub(crate) fn start_poll_sources(
             root_pid,
             cwd.to_path_buf(),
             raw_tx.clone(),
+            replay_new_rollout,
         ) {
             Ok(h) => Some(h),
             Err(e) => {
