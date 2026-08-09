@@ -4,7 +4,7 @@
 A macOS kernel-event tracer for Claude Code and Codex sessions — every process,
 file, and network connection, live in your terminal or replayed later.
 
-**[Visit the tracce website 👇](https://tracce.chih-han.com/)**
+**[Visit the tracce website 🔗](https://tracce.chih-han.com/)**
 <a href="https://tracce.chih-han.com/">
   <img src=".github/assets/tracce-preview.png" alt="tracce website — see what your coding agent really does" width="100%" />
 </a>
