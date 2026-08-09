@@ -15,28 +15,33 @@
 use crate::event::{Event, EventData, EventKind, FileOp, ProcessRef};
 use anyhow::{Context, Result};
 use std::fs::File;
-use std::io::{BufRead, BufReader, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::SyncSender;
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use super::run::ThreadStop;
 
 const POLL: Duration = Duration::from_millis(300);
+const MAX_MATCH_DISTANCE: Duration = Duration::from_secs(6 * 60 * 60);
+const AMBIGUOUS_DISTANCE: Duration = Duration::from_secs(1);
+const NEW_TRANSCRIPT_WINDOW: Duration = Duration::from_secs(60);
 
 pub fn start_transcript_thread(
     root_pid: u32,
     cwd: PathBuf,
     tx: SyncSender<Event>,
+    replay_new_transcript: bool,
 ) -> Result<ThreadStop> {
     let projects_dir = transcript_dir_for(&cwd)
         .with_context(|| "could not resolve ~/.claude/projects directory")?;
 
     let flag = Arc::new(AtomicBool::new(false));
     let stop = flag.clone();
+    let selection_started = SystemTime::now();
 
     let join = thread::spawn(move || {
         let proc_ref = Arc::new(ProcessRef {
@@ -46,21 +51,36 @@ pub fn start_transcript_thread(
             argv: Vec::new(),
         });
 
-        // We tail one file at a time — the newest .jsonl in the project dir
-        // whose mtime is fresh enough that it's likely the active session.
+        // We tail one file at a time. Wrapped launches match by creation time
+        // so another active Claude session in the same project cannot steal the
+        // tailer merely by writing more recently. Attach mode uses mtime.
         let mut current: Option<TailState> = None;
 
         while !stop.load(Ordering::SeqCst) {
-            if let Some(newest) = newest_jsonl(&projects_dir) {
+            if let Some(newest) = matching_transcript(
+                &projects_dir,
+                selection_started,
+                replay_new_transcript,
+            ) {
                 let switch = match &current {
                     Some(s) => s.path != newest,
                     None => true,
                 };
                 if switch {
-                    // Open new file and seek to end so we don't replay history.
                     if let Ok(file) = File::open(&newest) {
                         let len = file.metadata().map(|m| m.len()).unwrap_or(0);
-                        current = Some(TailState { path: newest, file, offset: len });
+                        let offset = initial_offset(
+                            &file,
+                            len,
+                            selection_started,
+                            replay_new_transcript,
+                        );
+                        current = Some(TailState {
+                            path: newest,
+                            file,
+                            offset,
+                            pending: String::new(),
+                        });
                     }
                 }
             }
@@ -80,6 +100,8 @@ struct TailState {
     path: PathBuf,
     file: File,
     offset: u64,
+    /// Preserve an unterminated final line until Claude finishes writing it.
+    pending: String,
 }
 
 fn drain_new_lines(
@@ -92,26 +114,35 @@ fn drain_new_lines(
         Ok(m) => m.len(),
         Err(_) => return,
     };
-    if new_len <= state.offset {
+    if new_len < state.offset {
+        state.pending.clear();
+        state.offset = new_len;
+        let _ = state.file.seek(SeekFrom::Start(new_len));
+        return;
+    }
+    if new_len == state.offset {
         return;
     }
     if state.file.seek(SeekFrom::Start(state.offset)).is_err() {
         return;
     }
-    let mut reader = BufReader::new(&mut state.file);
-    let mut buf = String::new();
-    loop {
-        buf.clear();
-        match reader.read_line(&mut buf) {
-            Ok(0) => break,
-            Ok(_) => {
-                for ev in parse_transcript_line(&buf, root_pid, proc_ref) {
-                    if tx.send(ev).is_err() { return; }
-                }
+    let mut bytes = Vec::new();
+    if state.file.read_to_end(&mut bytes).is_err() {
+        return;
+    }
+    state.pending.push_str(&String::from_utf8_lossy(&bytes));
+
+    while let Some(end) = state.pending.find('\n') {
+        let line = state.pending[..end].to_string();
+        state.pending.drain(..=end);
+        for ev in parse_transcript_line(&line, root_pid, proc_ref) {
+            if tx.send(ev).is_err() {
+                return;
             }
-            Err(_) => break,
         }
     }
+    // `pending` already owns the unterminated bytes, so continue reading from
+    // the physical EOF rather than reading those bytes a second time.
     state.offset = new_len;
 }
 
@@ -206,19 +237,81 @@ pub fn transcript_dir_for(cwd: &Path) -> Option<PathBuf> {
     Some(home.join(".claude").join("projects").join(encoded))
 }
 
-fn newest_jsonl(dir: &Path) -> Option<PathBuf> {
+fn matching_transcript(
+    dir: &Path,
+    started: SystemTime,
+    prefer_created: bool,
+) -> Option<PathBuf> {
     let entries = std::fs::read_dir(dir).ok()?;
-    let mut best: Option<(PathBuf, std::time::SystemTime)> = None;
+    let mut candidates = Vec::new();
     for entry in entries.flatten() {
         let p = entry.path();
         if p.extension().and_then(|s| s.to_str()) != Some("jsonl") { continue; }
-        let mtime = entry.metadata().ok().and_then(|m| m.modified().ok())?;
-        match &best {
-            Some((_, t)) if *t >= mtime => {}
-            _ => best = Some((p, mtime)),
+        let metadata = entry.metadata().ok()?;
+        let score = transcript_time_score(
+            metadata.created().ok(),
+            metadata.modified().ok(),
+            started,
+            prefer_created,
+        )?;
+        candidates.push((score, p));
+    }
+    candidates.sort_by_key(|(score, _)| *score);
+    let (best_score, best_path) = candidates.first()?.clone();
+    if prefer_created && best_score > MAX_MATCH_DISTANCE {
+        return None;
+    }
+    if let Some((second_score, _)) = candidates.get(1) {
+        if second_score.saturating_sub(best_score) <= AMBIGUOUS_DISTANCE {
+            return None;
         }
     }
-    best.map(|(p, _)| p)
+    Some(best_path)
+}
+
+fn transcript_time_score(
+    created: Option<SystemTime>,
+    modified: Option<SystemTime>,
+    target: SystemTime,
+    prefer_created: bool,
+) -> Option<Duration> {
+    let times = if prefer_created {
+        [created.or(modified), None]
+    } else {
+        [created, modified]
+    };
+    times
+        .into_iter()
+        .flatten()
+        .map(|time| {
+            time.duration_since(target)
+                .or_else(|_| target.duration_since(time))
+                .unwrap_or(Duration::MAX)
+        })
+        .min()
+}
+
+fn initial_offset(
+    file: &File,
+    len: u64,
+    selection_started: SystemTime,
+    replay_new_transcript: bool,
+) -> u64 {
+    if !replay_new_transcript {
+        return len;
+    }
+    let created_near_start = file
+        .metadata()
+        .ok()
+        .and_then(|metadata| metadata.created().ok())
+        .and_then(|created| {
+            created
+                .duration_since(selection_started)
+                .or_else(|_| selection_started.duration_since(created))
+                .ok()
+        })
+        .is_some_and(|distance| distance <= NEW_TRANSCRIPT_WINDOW);
+    if created_near_start { 0 } else { len }
 }
 
 fn now_ns() -> u64 {
@@ -231,6 +324,16 @@ fn now_ns() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write as _;
+
+    fn proc_ref() -> Arc<ProcessRef> {
+        Arc::new(ProcessRef {
+            pid: 100,
+            comm: "claude".into(),
+            image: PathBuf::new(),
+            argv: vec![],
+        })
+    }
 
     #[test]
     fn encodes_cwd_to_claude_project_path() {
@@ -257,10 +360,7 @@ mod tests {
                 {"type": "tool_use", "name": "Bash", "input": {"command": "git status"}}
             ]}
         }"#;
-        let proc_ref = Arc::new(ProcessRef {
-            pid: 100, comm: "claude".into(), image: PathBuf::new(), argv: vec![],
-        });
-        let events = parse_transcript_line(line, 100, &proc_ref);
+        let events = parse_transcript_line(line, 100, &proc_ref());
         assert_eq!(events.len(), 1);
         if let EventData::File { op, path, .. } = &events[0].data {
             assert_eq!(*op, FileOp::Bash);
@@ -277,10 +377,7 @@ mod tests {
                  "input": {"file_path": "/x/y.rs", "old_string": "a", "new_string": "b"}}
             ]}
         }"#;
-        let proc_ref = Arc::new(ProcessRef {
-            pid: 100, comm: "claude".into(), image: PathBuf::new(), argv: vec![],
-        });
-        let events = parse_transcript_line(line, 100, &proc_ref);
+        let events = parse_transcript_line(line, 100, &proc_ref());
         assert_eq!(events.len(), 1);
         if let EventData::File { op, path, .. } = &events[0].data {
             assert_eq!(*op, FileOp::Edit);
@@ -297,10 +394,86 @@ mod tests {
                 {"type": "tool_use", "name": "Glob", "input": {"pattern": "**/*.rs"}}
             ]}
         }"#;
-        let proc_ref = Arc::new(ProcessRef {
-            pid: 100, comm: "claude".into(), image: PathBuf::new(), argv: vec![],
-        });
-        assert!(parse_transcript_line(user, 100, &proc_ref).is_empty());
-        assert!(parse_transcript_line(unknown, 100, &proc_ref).is_empty());
+        assert!(parse_transcript_line(user, 100, &proc_ref()).is_empty());
+        assert!(parse_transcript_line(unknown, 100, &proc_ref()).is_empty());
+    }
+
+    #[test]
+    fn extracts_read_write_and_multi_edit_tool_calls() {
+        let line = r#"{
+            "type": "assistant",
+            "message": {"content": [
+                {"type": "tool_use", "name": "Read", "input": {"file_path": "/x/in.rs"}},
+                {"type": "tool_use", "name": "Write", "input": {"file_path": "/x/out.rs"}},
+                {"type": "tool_use", "name": "MultiEdit", "input": {"file_path": "/x/many.rs"}}
+            ]}
+        }"#;
+        let events = parse_transcript_line(line, 100, &proc_ref());
+        assert_eq!(events.len(), 3);
+        assert!(matches!(&events[0].data, EventData::File { op: FileOp::Open, .. }));
+        assert!(matches!(&events[1].data, EventData::File { op: FileOp::Write, .. }));
+        assert!(matches!(&events[2].data, EventData::File { op: FileOp::MultiEdit, .. }));
+    }
+
+    #[test]
+    fn launch_matching_ignores_an_old_transcripts_recent_modification() {
+        let target = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+        let old_created = target - Duration::from_secs(600);
+        let recently_modified = target + Duration::from_secs(1);
+        let new_created = target + Duration::from_secs(20);
+
+        assert_eq!(
+            transcript_time_score(Some(old_created), Some(recently_modified), target, true),
+            Some(Duration::from_secs(600))
+        );
+        assert_eq!(
+            transcript_time_score(Some(new_created), Some(new_created), target, true),
+            Some(Duration::from_secs(20))
+        );
+        assert_eq!(
+            transcript_time_score(Some(old_created), Some(recently_modified), target, false),
+            Some(Duration::from_secs(1))
+        );
+    }
+
+    #[test]
+    fn replays_a_transcript_created_during_launch_but_not_attach() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), "already written\n").unwrap();
+        let opened = File::open(file.path()).unwrap();
+        let len = opened.metadata().unwrap().len();
+
+        assert_eq!(initial_offset(&opened, len, SystemTime::now(), true), 0);
+        assert_eq!(initial_offset(&opened, len, SystemTime::now(), false), len);
+    }
+
+    #[test]
+    fn preserves_a_tool_call_split_across_writes() {
+        let line = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"git status"}}]}}"#;
+        let split = line.len() / 2;
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), &line[..split]).unwrap();
+        let opened = File::open(file.path()).unwrap();
+        let mut state = TailState {
+            path: file.path().to_path_buf(),
+            file: opened,
+            offset: 0,
+            pending: String::new(),
+        };
+        let (tx, rx) = std::sync::mpsc::sync_channel(4);
+
+        drain_new_lines(&mut state, 100, &proc_ref(), &tx);
+        assert!(rx.try_recv().is_err());
+
+        let mut append = std::fs::OpenOptions::new()
+            .append(true)
+            .open(file.path())
+            .unwrap();
+        writeln!(append, "{}", &line[split..]).unwrap();
+        drop(append);
+
+        drain_new_lines(&mut state, 100, &proc_ref(), &tx);
+        let event = rx.try_recv().expect("completed line should emit an event");
+        assert!(matches!(event.data, EventData::File { op: FileOp::Bash, .. }));
     }
 }
