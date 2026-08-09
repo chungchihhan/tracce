@@ -1,11 +1,15 @@
 <div align="center">
 
 ### `tracce` - See exactly what Claude Code and Codex do on your machine
-<img width="1624" height="1061" alt="image" src="https://github.com/user-attachments/assets/747303a2-9927-418b-aa63-98db200f5cd1" />
-<img width="1624" height="1061" alt="image" src="https://github.com/user-attachments/assets/3d194072-2048-467a-aa7f-87c53f5f0abf" />
-
 A macOS kernel-event tracer for Claude Code and Codex sessions — every process,
 file, and network connection, live in your terminal or replayed later.
+<img width="3164" height="2060" alt="39564" src="https://github.com/user-attachments/assets/fe763499-7696-4381-8e24-4b6f86beadc4" />
+<img width="3164" height="2060" alt="66982" src="https://github.com/user-attachments/assets/0a369f68-03bf-4eaf-aa9e-12039d46f61f" />
+
+tracce instantly flags sensitive files and risky commands as your coding agent works !!!
+<img width="960" height="540" alt="Zed - tracce —  env - 2026-08-09 16 17 07-Edited-1280px-1 2x" src="https://github.com/user-attachments/assets/d12f8fb4-fcfb-44e3-9e86-c7014790927d" />
+
+
 
 ![platform](https://img.shields.io/badge/platform-macOS%2013%2B-000000?logo=apple&logoColor=white)
 ![built with Rust](https://img.shields.io/badge/built%20with-Rust-CE412B?logo=rust&logoColor=white)
