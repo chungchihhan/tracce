@@ -25,11 +25,13 @@ use super::run::ThreadStop;
 const POLL: Duration = Duration::from_millis(300);
 const MAX_MATCH_DISTANCE: Duration = Duration::from_secs(6 * 60 * 60);
 const AMBIGUOUS_DISTANCE: Duration = Duration::from_secs(1);
+const NEW_ROLLOUT_WINDOW: Duration = Duration::from_secs(60);
 
 pub fn start_transcript_thread(
     root_pid: u32,
     cwd: PathBuf,
     tx: SyncSender<Event>,
+    replay_new_rollout: bool,
 ) -> Result<ThreadStop> {
     let sessions_dir = sessions_dir().context("could not resolve CODEX_HOME/sessions")?;
     if !sessions_dir.exists() {
@@ -50,7 +52,12 @@ pub fn start_transcript_thread(
         let mut current: Option<TailState> = None;
 
         while !stop.load(Ordering::SeqCst) {
-            if let Some(candidate) = matching_rollout(&sessions_dir, &cwd, selection_started) {
+            if let Some(candidate) = matching_rollout(
+                &sessions_dir,
+                &cwd,
+                selection_started,
+                replay_new_rollout,
+            ) {
                 let switch = current
                     .as_ref()
                     .map(|s| s.path != candidate)
@@ -58,10 +65,16 @@ pub fn start_transcript_thread(
                 if switch {
                     if let Ok(file) = File::open(&candidate) {
                         let len = file.metadata().map(|m| m.len()).unwrap_or(0);
+                        let offset = initial_offset(
+                            &file,
+                            len,
+                            selection_started,
+                            replay_new_rollout,
+                        );
                         current = Some(TailState {
                             path: candidate,
                             file,
-                            offset: len,
+                            offset,
                             pending: String::new(),
                         });
                     }
@@ -206,12 +219,18 @@ fn parse_call(
     }
 }
 
-/// Extract the double-quoted `cmd` field from a JavaScript tool-call object.
-/// The field value is JSON-compatible, so serde_json also handles escaped
-/// quotes, backslashes, and newlines for us.
+/// Extract the double-quoted `cmd` value from a JavaScript tool-call object.
+/// Codex may serialize the key as either `cmd` or `"cmd"`. The field value is
+/// JSON-compatible, so serde_json also handles escaped quotes, backslashes,
+/// and newlines for us.
 fn extract_js_cmd(input: &str) -> Option<String> {
-    let marker = input.find("cmd")?;
-    let rest = input[marker + 3..].trim_start();
+    let rest = if let Some(marker) = input.find("\"cmd\"") {
+        &input[marker + 5..]
+    } else {
+        let marker = input.find("cmd")?;
+        &input[marker + 3..]
+    };
+    let rest = rest.trim_start();
     let rest = rest.strip_prefix(':')?.trim_start();
     if !rest.starts_with('"') {
         return None;
@@ -319,13 +338,20 @@ fn sessions_dir() -> Option<PathBuf> {
     dirs::home_dir().map(|home| home.join(".codex").join("sessions"))
 }
 
-fn matching_rollout(root: &Path, cwd: &Path, started: SystemTime) -> Option<PathBuf> {
+fn matching_rollout(
+    root: &Path,
+    cwd: &Path,
+    started: SystemTime,
+    prefer_created: bool,
+) -> Option<PathBuf> {
     let mut candidates = Vec::new();
     collect_rollouts(root, &mut candidates);
     let mut scored = candidates
         .into_iter()
         .filter(|path| rollout_cwd(path).as_deref() == Some(cwd))
-        .filter_map(|path| nearest_file_time(&path, started).map(|score| (score, path)))
+        .filter_map(|path| {
+            nearest_file_time(&path, started, prefer_created).map(|score| (score, path))
+        })
         .collect::<Vec<_>>();
     scored.sort_by_key(|(score, _)| *score);
     let (best_score, best_path) = scored.first()?.clone();
@@ -378,9 +404,28 @@ fn rollout_cwd(path: &Path) -> Option<PathBuf> {
     None
 }
 
-fn nearest_file_time(path: &Path, target: SystemTime) -> Option<Duration> {
+fn nearest_file_time(path: &Path, target: SystemTime, prefer_created: bool) -> Option<Duration> {
     let metadata = path.metadata().ok()?;
-    [metadata.created().ok(), metadata.modified().ok()]
+    time_score(
+        metadata.created().ok(),
+        metadata.modified().ok(),
+        target,
+        prefer_created,
+    )
+}
+
+fn time_score(
+    created: Option<SystemTime>,
+    modified: Option<SystemTime>,
+    target: SystemTime,
+    prefer_created: bool,
+) -> Option<Duration> {
+    let times = if prefer_created {
+        [created.or(modified), None]
+    } else {
+        [created, modified]
+    };
+    times
         .into_iter()
         .flatten()
         .map(|t| {
@@ -389,6 +434,33 @@ fn nearest_file_time(path: &Path, target: SystemTime) -> Option<Duration> {
                 .unwrap_or(Duration::MAX)
         })
         .min()
+}
+
+/// A rollout created as part of a wrapped `tracce codex` launch may appear
+/// after Codex has already written its first tool calls. Replay that new file
+/// from the beginning. Attach mode passes `false` to avoid replaying commands
+/// from before tracce attached to an existing Codex process.
+fn initial_offset(
+    file: &File,
+    len: u64,
+    selection_started: SystemTime,
+    replay_new_rollout: bool,
+) -> u64 {
+    if !replay_new_rollout {
+        return len;
+    }
+    let created_near_start = file
+        .metadata()
+        .ok()
+        .and_then(|metadata| metadata.created().ok())
+        .and_then(|created| {
+            created
+                .duration_since(selection_started)
+                .or_else(|_| selection_started.duration_since(created))
+                .ok()
+        })
+        .is_some_and(|distance| distance <= NEW_ROLLOUT_WINDOW);
+    if created_near_start { 0 } else { len }
 }
 
 #[cfg(test)]
@@ -453,6 +525,17 @@ mod tests {
     }
 
     #[test]
+    fn extracts_exec_command_with_quoted_javascript_key() {
+        let line = r#"{"type":"response_item","payload":{"type":"custom_tool_call","name":"exec","input":"const r = await tools.exec_command({\"cmd\":\"pwd && git status\",\"workdir\":\"/tmp/project\"});"}}"#;
+        let events = parse_rollout_line(line, 100, &proc_ref());
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            &events[0].data,
+            EventData::File { op: FileOp::Bash, path, .. } if path == Path::new("pwd && git status")
+        ));
+    }
+
+    #[test]
     fn matches_rollout_by_metadata_cwd() {
         let root = tempfile::TempDir::new().unwrap();
         let day = root.path().join("2026/07/20");
@@ -471,7 +554,40 @@ mod tests {
             root.path(),
             Path::new("/tmp/project"),
             SystemTime::now(),
+            true,
         ).unwrap();
         assert_eq!(got, wanted);
+    }
+
+    #[test]
+    fn launch_matching_ignores_an_old_rollouts_recent_modification() {
+        let target = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+        let old_created = target - Duration::from_secs(600);
+        let recently_modified = target + Duration::from_secs(1);
+        let new_created = target + Duration::from_secs(20);
+
+        assert_eq!(
+            time_score(Some(old_created), Some(recently_modified), target, true),
+            Some(Duration::from_secs(600))
+        );
+        assert_eq!(
+            time_score(Some(new_created), Some(new_created), target, true),
+            Some(Duration::from_secs(20))
+        );
+        assert_eq!(
+            time_score(Some(old_created), Some(recently_modified), target, false),
+            Some(Duration::from_secs(1))
+        );
+    }
+
+    #[test]
+    fn replays_a_rollout_created_during_launch() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), "already written\n").unwrap();
+        let opened = File::open(file.path()).unwrap();
+        let len = opened.metadata().unwrap().len();
+
+        assert_eq!(initial_offset(&opened, len, SystemTime::now(), true), 0);
+        assert_eq!(initial_offset(&opened, len, SystemTime::now(), false), len);
     }
 }

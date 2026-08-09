@@ -30,8 +30,6 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 const RAW_CHAN_CAP: usize = 4096;
-const FLUSH_INTERVAL: Duration = Duration::from_millis(250);
-
 pub fn run(agent: Option<Provider>, pid: Option<u32>, root: &Path) -> Result<()> {
     if agent == Some(Provider::Other) {
         return Err(anyhow!("attach supports Claude or Codex, not arbitrary commands"));
@@ -78,8 +76,8 @@ pub fn run(agent: Option<Provider>, pid: Option<u32>, root: &Path) -> Result<()>
 
     let persist = Arc::new(Persist::open(&session.events_path())?);
     let (net_handle, tree_poll_handle, transcript_handle) =
-        run::start_poll_sources(provider, target_pid, &cwd, eslogger_active, &agg, &raw_tx)?;
-    let flush_handle = run::start_flush_thread(persist.clone(), FLUSH_INTERVAL);
+        run::start_poll_sources(provider, target_pid, &cwd, eslogger_active, false, &agg, &raw_tx)?;
+    let flush_handle = run::start_flush_thread(persist.clone(), run::LIVE_FLUSH_INTERVAL);
 
     let (aggregator_handle, persist_handle) = run::spawn_pipeline(agg, persist, raw_rx);
 

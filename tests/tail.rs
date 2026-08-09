@@ -53,3 +53,29 @@ fn no_follow_returns_eof_after_initial_read() {
     let none = tail.drain(Duration::from_millis(50)).unwrap();
     assert!(none.is_empty());
 }
+
+#[test]
+fn zero_budget_follow_reopens_after_file_replacement() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("events.jsonl");
+    std::fs::write(&path, format!("{}\n", serde_json::to_string(&ev(1)).unwrap())).unwrap();
+
+    let mut tail = Tail::open(&path, true).unwrap();
+    assert_eq!(tail.drain(Duration::ZERO).unwrap().len(), 1);
+
+    let replacement = dir.path().join("replacement.jsonl");
+    std::fs::write(
+        &replacement,
+        format!(
+            "{}\n{}\n",
+            serde_json::to_string(&ev(1)).unwrap(),
+            serde_json::to_string(&ev(2)).unwrap()
+        ),
+    )
+    .unwrap();
+    std::fs::rename(replacement, &path).unwrap();
+
+    let appended = tail.drain(Duration::ZERO).unwrap();
+    assert_eq!(appended.len(), 1);
+    assert_eq!(appended[0].ts_ns, 2);
+}

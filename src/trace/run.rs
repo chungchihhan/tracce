@@ -22,6 +22,7 @@ const RAW_CHAN_CAP: usize = 4096;
 const PERSIST_CHAN_CAP: usize = 8192;
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 const TREE_POLL_INTERVAL: Duration = Duration::from_millis(100);
+pub(crate) const LIVE_FLUSH_INTERVAL: Duration = Duration::from_millis(250);
 /// How long to wait for eslogger's first event when sudo is already cached
 /// (no prompt expected — events arrive within milliseconds if it's working).
 const ESLOGGER_READY_TIMEOUT: Duration = Duration::from_secs(8);
@@ -76,8 +77,9 @@ pub fn run(argv: Vec<String>, provider: Provider, root: PathBuf) -> Result<i32> 
     emit_synthetic_root_exec(&raw_tx, child_pid, tracer_pid, &argv);
 
     let persist = Arc::new(Persist::open(&session.events_path())?);
+    let flush_handle = start_flush_thread(persist.clone(), LIVE_FLUSH_INTERVAL);
     let (net_handle, tree_poll_handle, transcript_handle) =
-        start_poll_sources(provider, child_pid, &cwd, eslogger_active, &agg, &raw_tx)?;
+        start_poll_sources(provider, child_pid, &cwd, eslogger_active, true, &agg, &raw_tx)?;
 
     let (aggregator_handle, persist_handle) = spawn_pipeline(agg, persist, raw_rx);
 
@@ -93,6 +95,7 @@ pub fn run(argv: Vec<String>, provider: Provider, root: PathBuf) -> Result<i32> 
     drop(raw_tx);
     aggregator_handle.join().ok();
     persist_handle.join().ok();
+    flush_handle.shutdown();
 
     session.mark_status(SessionStatus::Done)?;
     eprintln!("tracce · session ended · path: {}", session.dir().display());
@@ -215,6 +218,7 @@ pub(crate) fn start_poll_sources(
     root_pid: u32,
     cwd: &std::path::Path,
     eslogger_active: bool,
+    replay_new_rollout: bool,
     agg: &Arc<Mutex<Aggregator>>,
     raw_tx: &SyncSender<Event>,
 ) -> Result<(ThreadStop, Option<ThreadStop>, Option<ThreadStop>)> {
@@ -246,6 +250,7 @@ pub(crate) fn start_poll_sources(
             root_pid,
             cwd.to_path_buf(),
             raw_tx.clone(),
+            replay_new_rollout,
         ) {
             Ok(h) => Some(h),
             Err(e) => {
@@ -309,10 +314,8 @@ pub(crate) fn spawn_pipeline(
     (aggregator_handle, persist_handle)
 }
 
-/// Flush the persist buffer on a timer. Wrap mode flushes at exit, but the
-/// live attach TUI tails the JSONL as it's written, so it needs the bytes on
-/// disk promptly during quiet stretches (Persist otherwise only flushes every
-/// 256 events).
+/// Flush the persist buffer on a timer so live viewers see events promptly
+/// during quiet stretches (Persist otherwise only flushes every 256 events).
 pub(crate) fn start_flush_thread(persist: Arc<Persist>, interval: Duration) -> ThreadStop {
     let flag = Arc::new(AtomicBool::new(false));
     let stop = flag.clone();
