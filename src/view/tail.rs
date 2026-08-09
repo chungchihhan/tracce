@@ -36,8 +36,12 @@ impl Tail {
         }
         // Poll for new bytes until budget exhausted or something shows up.
         let deadline = Instant::now() + budget;
-        while Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(40));
+        let mut first_check = true;
+        while first_check || Instant::now() < deadline {
+            if !first_check {
+                std::thread::sleep(Duration::from_millis(40));
+            }
+            first_check = false;
             // Re-open the file to pick up writes flushed by another process/handle.
             // BufReader on the same file handle may not see appended data after EOF
             // without seeking back; re-opening is more reliable.
@@ -49,6 +53,9 @@ impl Tail {
             self.reader = new_reader;
             self.read_available(&mut out, max_lines)?;
             if out.len() > before {
+                break;
+            }
+            if budget.is_zero() {
                 break;
             }
         }
