@@ -3,6 +3,13 @@
 ### `tracce` - See exactly what Claude Code and Codex do on your machine
 A macOS kernel-event tracer for Claude Code and Codex sessions — every process,
 file, and network connection, live in your terminal or replayed later.
+
+<a href="https://tracce.chih-han.com/">
+  <img src=".github/assets/tracce-preview.png" alt="tracce website — see what your coding agent really does" width="100%" />
+</a>
+
+**[Visit the tracce website →](https://tracce.chih-han.com/)**
+
 <img width="3164" height="2060" alt="39564" src="https://github.com/user-attachments/assets/fe763499-7696-4381-8e24-4b6f86beadc4" />
 <img width="3164" height="2060" alt="66982" src="https://github.com/user-attachments/assets/0a369f68-03bf-4eaf-aa9e-12039d46f61f" />
 
